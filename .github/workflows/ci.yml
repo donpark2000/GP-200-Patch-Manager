@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:   # adds a "Run workflow" button for on-demand runs
+
+jobs:
+  test:
+    name: Regression suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The whole regression suite is hardware-free (fake/mock MIDI
+        # devices only), so it can genuinely run anywhere -- this also
+        # doubles as a real check that the portability work (no hardcoded
+        # paths, no leftover files) actually holds outside our own machines.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install mido python-rtmidi
+      - name: Run regression suite
+        run: python run_tests.py
+
+  build-windows-exe:
+    name: Build standalone Windows .exe
+    needs: test   # only build from a commit that actually passed every test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install mido python-rtmidi pyinstaller
+      - name: Build with PyInstaller
+        # mido loads its backend (python-rtmidi) dynamically at runtime
+        # rather than via a normal top-level import, which PyInstaller's
+        # static analysis misses without this hint -- found by testing the
+        # built exe, not assumed.
+        run: pyinstaller --onefile --name gp200 --hidden-import mido.backends.rtmidi gp200.py
+      - name: Upload built exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: gp200-windows-exe
+          path: dist/gp200.exe
