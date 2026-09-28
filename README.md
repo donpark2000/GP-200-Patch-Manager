@@ -1,5 +1,7 @@
 # GP-200 Patch Manager
 
+[![CI](https://github.com/donpark2000/GP-200-Patch-Manager/actions/workflows/ci.yml/badge.svg)](https://github.com/donpark2000/GP-200-Patch-Manager/actions/workflows/ci.yml)
+
 A command-line tool for **bulk backup and restore of Valeton GP-200 patches**,
 talking live SysEx over USB-MIDI directly to the pedal.
 
@@ -8,6 +10,25 @@ It doesn't know or care about effects, amps, or cabs -- it only moves whole
 up your whole bank, push a collection of patches onto a fresh device, or pull
 one patch back down, this is a lightweight way to do it without a full
 editor.
+
+## Download
+
+Most people should just grab the pre-built executable for their OS -- no
+Python install needed. Get the latest one from the
+**[Releases page](../../releases/tag/latest)** ("Latest build", auto-updated
+by CI on every change to `main`):
+
+| Your OS | Download | Before it'll run |
+|---|---|---|
+| Windows | `gp200-windows.exe` | Nothing extra -- just run it. Windows SmartScreen may warn about an unrecognized app the first time; click "More info" -> "Run anyway". **Confirmed working** on a real machine with no Python installed. |
+| Linux | `gp200-linux` | Make it executable first: `chmod +x gp200-linux`. Built on Ubuntu 22.04 -- works on anything with an equal or newer glibc (confirmed on Bodhi Linux 7). A noticeably older distro may need building from source instead (see below). |
+| macOS | `gp200-macos` | macOS blocks unsigned apps by default (this one isn't code-signed). If you get a "can't be opened" message: right-click the file -> Open -> confirm, or run `xattr -d com.apple.quarantine ./gp200-macos` in Terminal first. **Not yet verified on a real Mac** -- please open an issue if it doesn't work for you. |
+
+Once you have it, jump to [Usage](#usage) below -- the commands are identical
+whether you're running the executable or the Python script.
+
+If you want to modify the code, or the executable doesn't work for your
+system, see [Building from source](#building-from-source).
 
 ## Why this exists
 
@@ -37,21 +58,12 @@ This is an actively evolving personal project, not a finished product --
 `PROTOCOL_NOTES.md` tracks what's confirmed, what's still open, and the
 evidence behind each finding.
 
-## Requirements
-
-- Python 3.12 (developed and tested against this version specifically)
-- [`mido`](https://pypi.org/project/mido/) and
-  [`python-rtmidi`](https://pypi.org/project/python-rtmidi/)
-- A USB-MIDI connection to a Valeton GP-200
-
-```bash
-pip install mido python-rtmidi
-```
-
-(A standalone executable that bundles Python and these dependencies -- no
-install required -- is planned; see the Roadmap below.)
-
 ## Usage
+
+The commands below are written as `gp200.py ...` (running from source with
+Python), but they're identical either way -- if you're using a downloaded
+executable, just swap in `./gp200-linux`, `./gp200-macos`, or `gp200.exe`
+(or `.\gp200.exe` in PowerShell) in place of `gp200.py` in every example.
 
 ```
 gp200.py list-ports                          # show every MIDI port Python can see
@@ -82,6 +94,21 @@ ports seen, full trace) to a file -- handy if something needs to be reported
 or diagnosed later. Run `gp200.py <command> --help` for full details and
 every option on any command above.
 
+## Building from source
+
+Only needed if you want to modify the code, or a downloaded executable
+doesn't work on your system.
+
+- Python 3.12 (developed and tested against this version specifically)
+- [`mido`](https://pypi.org/project/mido/) and
+  [`python-rtmidi`](https://pypi.org/project/python-rtmidi/)
+- A USB-MIDI connection to a Valeton GP-200
+
+```bash
+pip install mido python-rtmidi
+python gp200.py list-ports
+```
+
 ## Testing
 
 A hardware-free regression suite covers every command (fake/mock MIDI
@@ -110,8 +137,11 @@ second, independent reverse-engineering in [RigSheet](https://github.com/ricardo
 
 ## Roadmap
 
-- Standalone executable (PyInstaller) so end users don't need Python or
-  `mido`/`python-rtmidi` installed at all.
+- Confirm the macOS build actually runs on a real Mac (untested so far --
+  see [Download](#download)).
+- Proper versioned releases (`v0.1.0`, etc.) once the project is stable
+  enough to mean something by a version number, rather than just the
+  rolling "latest" build every push produces today.
 - Re-confirm the default flash-chunk write path against real hardware after
   its recent addressing fix.
 

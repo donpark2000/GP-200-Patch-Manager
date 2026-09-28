@@ -68,3 +68,47 @@ jobs:
         with:
           name: gp200-${{ matrix.os }}
           path: ${{ matrix.os == 'windows-latest' && 'dist/gp200.exe' || 'dist/gp200' }}
+
+  publish-latest-release:
+    name: Publish "latest" release with built executables
+    needs: build-executables
+    runs-on: ubuntu-latest
+    # Only publish from real pushes to main -- never from a pull request,
+    # which wouldn't have permission to do this anyway.
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - name: Download all built executables
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-all
+      - name: Rename for clarity and to avoid filename collisions
+        # Both the Linux and macOS builds come out of PyInstaller as a bare
+        # "gp200" with no OS in the name -- fine as separate CI artifacts
+        # (each lives in its own named folder), but they'd overwrite each
+        # other if uploaded to the same release without renaming first.
+        run: |
+          mkdir -p release-assets
+          cp dist-all/gp200-windows-latest/gp200.exe release-assets/gp200-windows.exe
+          cp dist-all/gp200-ubuntu-22.04/gp200      release-assets/gp200-linux
+          cp dist-all/gp200-macos-latest/gp200      release-assets/gp200-macos
+      - name: Publish/update the rolling "latest" release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest build (auto-updated)"
+          prerelease: true
+          body: |
+            Automatically built and published by CI from the most recent commit
+            on `main` -- not a stable numbered version, just always the current
+            state of the project. See the commit history for what's changed.
+
+            The regression suite (hardware-free, no GP-200 needed) passes on
+            Ubuntu, Windows, and macOS before this is ever built. The Windows
+            build has been confirmed to run standalone on a real machine with
+            no Python installed. The Linux and macOS builds succeed in CI but
+            have not each been individually confirmed to run correctly outside
+            of it -- see the README for known platform-specific notes
+            (macOS Gatekeeper, older-glibc Linux systems).
+          files: release-assets/*

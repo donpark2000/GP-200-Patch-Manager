@@ -506,15 +506,31 @@ def is_sysex(data: bytes, cmd: int, sub: int) -> bool:
             data[8] == cmd and data[9] == sub)
 
 
-def parse_preset_name(sysex_msg: bytes) -> str:
-    nibble_data = sysex_msg[13:-1]
-    decoded = nibble_decode(nibble_data)
+def extract_name_field(decoded: bytes) -> str:
+    """Pull the 16-byte name field out of an already nibble-decoded dump
+    (offset 28:44) and turn it into a display string.
+
+    Decodes as ASCII with '?' substitution for anything outside that range,
+    rather than mapping each byte 1:1 onto a Unicode code point (Latin-1):
+    the latter produces confident-looking mojibake for any non-ASCII byte
+    (e.g. a Chinese-firmware patch name) instead of an honest "?", and the
+    device's own supported character set for names is not independently
+    confirmed -- see PROTOCOL_NOTES.md. This only affects what's printed to
+    the console and the filename export derives; the actual name bytes
+    written into an exported .prst file come from the raw dump overlay in
+    build_prst_from_dump(), untouched by this function either way."""
     name = bytearray()
     for b in decoded[28:44]:
         if b == 0:
             break
         name.append(b)
     return name.decode("ascii", "replace")
+
+
+def parse_preset_name(sysex_msg: bytes) -> str:
+    nibble_data = sysex_msg[13:-1]
+    decoded = nibble_decode(nibble_data)
+    return extract_name_field(decoded)
 
 
 def assemble_chunks(chunks) -> bytes:
@@ -1498,7 +1514,7 @@ def cmd_export(args):
                 label = slot_to_label(slot)
                 try:
                     decoded = dev.read_dump_confirmed(slot)
-                    name = "".join(chr(b) for b in decoded[28:44] if b) or label
+                    name = extract_name_field(decoded) or label
                     print(f"{label}: {name!r} ({len(decoded)} bytes)")
                     data = normalize_export_dynamic_fields(build_prst_from_dump(decoded, name, skeleton))
                     entries[f"{label}_{safe_filename(name)}.prst"] = data
@@ -1512,7 +1528,7 @@ def cmd_export(args):
                 decoded = dev.read_dump_confirmed(slot)
             except TimeoutError as e:
                 sys.exit(f"Couldn't export {args.slot}: {e}")
-            name = "".join(chr(b) for b in decoded[28:44] if b) or args.slot
+            name = extract_name_field(decoded) or args.slot
             print(f"{args.slot}: {name!r} ({len(decoded)} bytes)")
             data = normalize_export_dynamic_fields(build_prst_from_dump(decoded, name, skeleton))
             out_path = Path(args.out) if args.out else Path(f"{args.slot}_{safe_filename(name)}.prst")

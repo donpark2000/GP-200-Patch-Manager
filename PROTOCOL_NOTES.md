@@ -1210,3 +1210,59 @@ consolidation and delivery step, not a backfill of missing coverage.
   finding 7's three runs rather than failing constantly like it did once
   `calibrate-settle` exercised it harder) — not blocking, not fully
   understood, noted in finding 8.
+
+## Finding 10: non-ASCII patch names (2026-09-28)
+
+Raised as a concern before any public sharing of the tool: the GP-200 ships
+in multiple markets, including a Chinese-firmware version, and it's not
+known whether patch names entered on that hardware (or via a companion app)
+could contain non-ASCII bytes in the 16-byte name field. Investigated by
+reading the actual code paths rather than assuming either "it's fine" or
+"it's broken":
+
+- **The exported `.prst` file's name bytes are never at risk.**
+  `build_prst_from_dump()` writes an exported file by overlaying the raw
+  device dump directly onto a skeleton — it takes a `name` string parameter
+  but never actually uses it for the file's byte content. Whatever bytes the
+  device sent for the name field land in the output file completely
+  unchanged, regardless of what any Python string manipulation does to a
+  derived display name. Verified with a real (not assumed) test:
+  `tests/test_export_name_encoding.py` builds a dump with non-ASCII name
+  bytes standing in for an unknown encoding (UTF-8-shaped, since we don't
+  know what a real Chinese-firmware unit would send) and confirms the exact
+  same bytes land at file offset 0x44 in the written `.prst`/zip entry.
+- **The display name (console output, derived export filename) was a real,
+  if cosmetic, bug.** `cmd_export`'s two inline extraction sites did
+  `"".join(chr(b) for b in decoded[28:44] if b)` — a byte-for-byte Latin-1
+  mapping. For any byte ≥ 0x80 this produces a *confident-looking but wrong*
+  character (e.g. a UTF-8-encoded CJK name would come out as scrambled
+  accented-Latin letters), which is worse than an obvious placeholder
+  because it doesn't look broken. It was also inconsistent with
+  `parse_preset_name` (used by `list`/`read`), which already decoded safely
+  via `.decode("ascii", "replace")`.
+- **Fix applied**: extracted the shared logic into one function,
+  `extract_name_field()`, used by `parse_preset_name` and both `cmd_export`
+  call sites. It decodes as ASCII with Python's standard `"replace"` error
+  handler, which substitutes the Unicode replacement character (U+FFFD, "�")
+  for anything non-ASCII — an honest "this wasn't ASCII" signal instead of
+  invented letters. This only changes what gets printed to the console and
+  what filename `safe_filename()` derives; it has zero effect on the actual
+  `.prst`/zip file content (see above). `safe_filename()` itself was checked
+  too: it only strips filesystem-reserved characters (`\/:*?"<>|`) and
+  doesn't choke on non-ASCII code points, including U+FFFD, on any platform
+  tested against.
+- **Still genuinely unknown, and not fixable from here**: what character set
+  (if any) the GP-200's own name field actually supports for non-ASCII
+  entry — ASCII-only via the hardware's own input method, some vendor
+  double-byte encoding for the Chinese firmware, UTF-8, or something else
+  entirely. Nothing in this project has ever touched a non-English-market
+  unit or a companion app that writes exotic bytes into that field. If
+  someone with a Chinese-firmware GP-200 (or any patch name typed with
+  accented/non-English characters) reports back, that's real evidence this
+  file should capture — until then this stays an open item, not a settled
+  one.
+
+Net effect for the planned public post: no patch data is ever at risk from
+this, on any firmware/language — the fix only makes the tool's own console
+output and generated filenames honest instead of silently wrong for a name
+it can't fully understand.
