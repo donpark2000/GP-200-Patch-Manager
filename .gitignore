@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller build artifacts (planned -- see README Roadmap)
+build/
+dist/
+*.spec
+
+# Run-time artifacts gp200.py can generate -- never meant to be committed
+gp200_*.log
+failed_verify_*.prst
+diag_backup*.prst
+gp200_*.zip
+*_test*.prst
+
+# Editors / OS cruft
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
