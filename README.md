@@ -75,8 +75,8 @@ gp200.py export --all                        # save all 256 slots to a .zip
 gp200.py export --start 34-A --end 36-D      # save a slot range to a .zip
 
 gp200.py upload patch.prst 34-B              # write one file to a slot
-gp200.py upload a.prst b.prst c.prst 10-A    # write several files to consecutive slots
-gp200.py upload backup.zip 10-A              # write every file in a zip to consecutive slots
+gp200.py upload a.prst b.prst c.prst 10-A    # write several files, filling 10-A, 10-B, 10-C...
+gp200.py upload backup.zip 10-A              # write every file in a zip, filling from 10-A on
 gp200.py apply-template patch.prst 30-A 34-D # write ONE file into every slot in a range
 
 gp200.py reread 37-A                         # repeated no-write reads, to isolate read-side noise
@@ -93,6 +93,15 @@ Every command supports `-d`/`--debug` for a full SysEx trace, and
 ports seen, full trace) to a file -- handy if something needs to be reported
 or diagnosed later. Run `gp200.py <command> --help` for full details and
 every option on any command above.
+
+**Restoring a backup**: a multi-file or zip `upload` always fills
+*consecutive* slots starting at the one you give it -- it does not read each
+patch's original slot back out of the zip. To put a backup back where it
+came from, upload it to the *same* slot you exported it from (a zip made
+with `export --all` starts at `1-A`, so it goes back with `upload
+backup.zip 1-A`). If that export printed a `skipped` warning for any slot,
+the zip has a gap that won't be preserved on restore -- run `export` again
+first to fill it in. See `gp200.py upload --help` for the full explanation.
 
 ## Building from source
 

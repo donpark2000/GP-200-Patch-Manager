@@ -1510,6 +1510,7 @@ def cmd_export(args):
     try:
         if slots is not None:
             entries = {}
+            skipped_labels = []
             for slot in slots:
                 label = slot_to_label(slot)
                 try:
@@ -1520,8 +1521,25 @@ def cmd_export(args):
                     entries[f"{label}_{safe_filename(name)}.prst"] = data
                 except TimeoutError as e:
                     print(f"{label}: skipped ({e})")
+                    skipped_labels.append(label)
             write_zip(entries, out_path)
             print(f"Wrote {len(entries)} patches to {out_path}")
+            # A zip has no concept of "empty slot" -- it's just however many
+            # entries got written. `upload` later fills slots consecutively
+            # from wherever ITS destination argument says, in zip order --
+            # it never looks at the skipped slot's original position (see
+            # upload's own help text). So a gap here isn't preserved on
+            # restore: it silently compacts, and every patch after the gap
+            # ends up one slot earlier than where it actually came from.
+            # Surface that now, while the user still knows which slot(s)
+            # timed out, rather than as a mystery after a later restore.
+            if skipped_labels:
+                print(f"WARNING: {len(skipped_labels)} slot(s) were skipped and are NOT in "
+                      f"this zip: {', '.join(skipped_labels)}. If you 'upload' this zip back "
+                      "later, patches pack consecutively from the destination slot onward -- "
+                      "the gap is NOT preserved, so every patch after it would land ONE SLOT "
+                      "EARLIER than where it actually came from. Re-run export to fill the "
+                      "gap(s) before using this zip to restore.")
         else:
             slot = label_to_slot(args.slot)
             try:
@@ -2345,7 +2363,12 @@ Quick examples:
   {prog} list-ports              # see if this can find your GP-200
   {prog} list                    # print every patch name (256 slots)
   {prog} export --all            # back up every patch to a .zip file
-  {prog} upload backup.zip 1-A   # write patches back onto the device
+  {prog} upload backup.zip 1-A   # fills slots starting at 1-A, in order
+
+A zip/multi-file upload always fills CONSECUTIVE slots starting at the one
+you give -- to restore a backup to where it came from, upload it to the
+SAME slot you exported it from (see 'upload --help' for the details,
+including what happens if the export skipped a slot).
 
 This has only been tested against one GP-200 -- back up your patches
 (export --all) before uploading or overwriting anything.
@@ -2368,13 +2391,62 @@ double-clicking the icon. To use it:
        {prog} list-ports              (see if it finds your GP-200)
        {prog} list                    (see every patch name on the device)
        {prog} export --all            (back up every patch to a .zip file)
-       {prog} upload backup.zip 1-A   (write patches back onto the device)
+       {prog} upload backup.zip 1-A   (fills slots starting at 1-A, in order)
 
 This has only been tested against one GP-200 -- back up your patches
-(export --all) before uploading or overwriting anything.
+(export --all) before uploading or overwriting anything. A zip/multi-file
+upload always fills consecutive slots starting where you tell it, so to
+restore a backup, upload it back to the SAME slot you exported it from
+(run "{prog} upload --help" for the details).
 
 For every command and option: {prog} --help
 """
+
+
+def _windows_console_process_count():
+    """Raw GetConsoleProcessList() call, split out from
+    _should_pause_before_exit() so a test can monkeypatch this one function
+    instead of needing a real ctypes.windll (which doesn't exist outside
+    Windows at all -- see that function for why this is never even called
+    on other platforms)."""
+    import ctypes
+    buf = (ctypes.c_uint * 1)()
+    return ctypes.windll.kernel32.GetConsoleProcessList(buf, 1)
+
+
+def _should_pause_before_exit() -> bool:
+    """True only for the specific case this exists to fix: a brand-new
+    console window Windows just created because the .exe was double-clicked,
+    which would otherwise vanish the instant the process exits. NOT true for
+    a frozen .exe run from an already-open terminal -- that window isn't
+    going anywhere regardless of what this program does, so a "press Enter
+    to close" prompt there is just confusing, not helpful (caught by actual
+    testing on 2026-09-28: running the .exe from an existing command prompt
+    still showed the close-this-window message, which made no sense there).
+    And never true for a source-code `python gp200.py` run at all.
+
+    Windows-only, via a documented heuristic: GetConsoleProcessList reports
+    how many processes are attached to the CURRENT console. Exactly 1 means
+    only this process is attached -- Windows created a fresh console just
+    for it (the double-click case). More than 1 means a shell (cmd.exe,
+    PowerShell, ...) is also attached, i.e. this ran inside an
+    already-existing terminal session."""
+    if not getattr(sys, "frozen", False):
+        return False
+    if sys.platform != "win32":
+        # Double-clicking a console binary from a Linux/macOS file manager
+        # doesn't reliably spawn a brand-new terminal the same way -- most
+        # either refuse to run it directly or ask first. Not the same
+        # vanishing-window failure mode, so no pause is needed there.
+        return False
+    try:
+        return _windows_console_process_count() <= 1
+    except Exception:
+        # Undeterminable for some reason -- err toward pausing. An extra
+        # "press Enter" is a minor annoyance for someone at a real prompt;
+        # a vanished window that looks like a crash is a far worse outcome
+        # for someone who just double-clicked it.
+        return True
 
 
 def main():
@@ -2384,15 +2456,12 @@ def main():
     # subparser error exits immediately with a usage message -- which, for
     # a double-clicked .exe, means a window flashes open and closes before
     # anyone can read it. Handle this case explicitly with a plain-language
-    # message instead of the technical argparse error, and (only when
-    # actually running as a frozen .exe -- see PyInstaller's `sys.frozen`)
-    # wait for a keypress so the window doesn't vanish. A source-code user
-    # running `python gp200.py` with no args still sees the same message,
-    # just without the pause -- their terminal was already there and isn't
-    # going anywhere.
+    # message instead of the technical argparse error, and -- only for that
+    # specific brand-new-console case, see _should_pause_before_exit() --
+    # wait for a keypress so the window doesn't vanish.
     if len(sys.argv) == 1:
         print(NO_ARGS_MESSAGE_TEMPLATE.format(prog=_prog_name()))
-        if getattr(sys, "frozen", False):
+        if _should_pause_before_exit():
             input("Press Enter to close this window...")
         sys.exit(0)
 
@@ -2449,11 +2518,21 @@ def main():
                     help="one or more .prst files, or a single .zip, followed by the "
                          "DESTINATION SLOT as the last argument -- e.g. 'patch.prst 34-B', "
                          "'a.prst b.prst c.prst 10-A', or 'backup.zip 10-A'. Multiple "
-                         "files/a zip write to consecutive slots starting there. In a "
-                         "zip, entries named like this tool's own export output (e.g. "
-                         "37A_Template.prst) are ordered by that slot label -- but only "
-                         "to decide ORDER; the actual destination is always the last "
-                         "argument on this command line, never inferred from the zip.")
+                         "files/a zip ALWAYS write to consecutive slots starting there -- "
+                         "e.g. a 10-entry zip uploaded to 10-A fills 10-A, 10-B, 10-C... "
+                         "This is NOT the same as 'restore each patch to the slot it came "
+                         "from': in a zip, entries named like this tool's own export output "
+                         "(e.g. 37A_Template.prst) are ordered by that slot label, but ONLY "
+                         "to decide the order they're written in -- the destination is "
+                         "always the last argument here, never read back out of the zip. "
+                         "To actually restore a backup to where it came from, upload it to "
+                         "the SAME starting slot you exported it from, e.g. a zip made with "
+                         "'export --all' (which starts at 1-A) goes back with "
+                         "'upload backup.zip 1-A'. And if that export skipped any slots "
+                         "(printed as 'skipped' at the time), the zip has a gap that "
+                         "ISN'T preserved -- everything after the gap will land one slot "
+                         "earlier than it actually came from. Re-run export first to fill "
+                         "any gaps before trusting a zip for a full restore.")
     s.add_argument("--force", action="store_true", help="skip the overwrite confirmation")
     s.add_argument("--method", choices=["flash", "live"], default="flash", help=write_method_help)
     s.add_argument("--commit", action="store_true",
