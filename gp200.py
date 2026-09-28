@@ -2403,50 +2403,28 @@ For every command and option: {prog} --help
 """
 
 
-def _windows_console_process_count():
-    """Raw GetConsoleProcessList() call, split out from
-    _should_pause_before_exit() so a test can monkeypatch this one function
-    instead of needing a real ctypes.windll (which doesn't exist outside
-    Windows at all -- see that function for why this is never even called
-    on other platforms)."""
-    import ctypes
-    buf = (ctypes.c_uint * 1)()
-    return ctypes.windll.kernel32.GetConsoleProcessList(buf, 1)
-
-
 def _should_pause_before_exit() -> bool:
-    """True only for the specific case this exists to fix: a brand-new
-    console window Windows just created because the .exe was double-clicked,
-    which would otherwise vanish the instant the process exits. NOT true for
-    a frozen .exe run from an already-open terminal -- that window isn't
-    going anywhere regardless of what this program does, so a "press Enter
-    to close" prompt there is just confusing, not helpful (caught by actual
-    testing on 2026-09-28: running the .exe from an existing command prompt
-    still showed the close-this-window message, which made no sense there).
-    And never true for a source-code `python gp200.py` run at all.
+    """Whether to wait for a keypress after the no-args message, before
+    exiting -- true for any frozen (PyInstaller) build, never for a
+    source-code `python gp200.py` run (nothing to protect there: the
+    terminal that ran it isn't going anywhere regardless).
 
-    Windows-only, via a documented heuristic: GetConsoleProcessList reports
-    how many processes are attached to the CURRENT console. Exactly 1 means
-    only this process is attached -- Windows created a fresh console just
-    for it (the double-click case). More than 1 means a shell (cmd.exe,
-    PowerShell, ...) is also attached, i.e. this ran inside an
-    already-existing terminal session."""
-    if not getattr(sys, "frozen", False):
-        return False
-    if sys.platform != "win32":
-        # Double-clicking a console binary from a Linux/macOS file manager
-        # doesn't reliably spawn a brand-new terminal the same way -- most
-        # either refuse to run it directly or ask first. Not the same
-        # vanishing-window failure mode, so no pause is needed there.
-        return False
-    try:
-        return _windows_console_process_count() <= 1
-    except Exception:
-        # Undeterminable for some reason -- err toward pausing. An extra
-        # "press Enter" is a minor annoyance for someone at a real prompt;
-        # a vanished window that looks like a crash is a far worse outcome
-        # for someone who just double-clicked it.
-        return True
+    This used to also try to detect "was this actually a double-click, in a
+    console Windows just created" via GetConsoleProcessList, and skip the
+    pause otherwise -- specifically to avoid a "press Enter to close this
+    window" prompt that makes no sense when run from an already-open
+    terminal (real complaint, 2026-09-28). But real-hardware testing the
+    same day found that detection unreliable: it's meant to tell a
+    double-click apart from an existing shell by counting processes
+    attached to the console, but that count can't tell a shell apart from
+    a terminal HOST process (e.g. Windows Terminal's own backend) that
+    Windows may attach to a freshly-opened console too -- undetectable
+    from here without more real Windows environments to test against than
+    this project has access to. Rather than ship a second unverified guess
+    on top of the first, this just always pauses when frozen, and the
+    wording below is written to make sense either way instead of trying to
+    be clever about when to show it."""
+    return getattr(sys, "frozen", False)
 
 
 def _flush_stray_windows_keystrokes():
@@ -2461,7 +2439,13 @@ def _flush_stray_windows_keystrokes():
     immediately -- consuming the pause before the user ever gets to press
     their OWN key. A short pause first lets any such trailing key-up/key-down
     events actually arrive before they're discarded; without it, a flush can
-    race the still-arriving keystroke and miss it."""
+    race the still-arriving keystroke and miss it.
+
+    Windows-only API (FlushConsoleInputBuffer doesn't exist elsewhere) --
+    a no-op on the Linux/macOS builds, which don't have this SmartScreen-style
+    dialog-dismissal path to begin with."""
+    if sys.platform != "win32":
+        return
     import ctypes, time
     time.sleep(0.3)
     STD_INPUT_HANDLE = -10
@@ -2476,9 +2460,14 @@ def main():
     # subparser error exits immediately with a usage message -- which, for
     # a double-clicked .exe, means a window flashes open and closes before
     # anyone can read it. Handle this case explicitly with a plain-language
-    # message instead of the technical argparse error, and -- only for that
-    # specific brand-new-console case, see _should_pause_before_exit() --
-    # wait for a keypress so the window doesn't vanish.
+    # message instead of the technical argparse error, and (for any frozen
+    # build -- see _should_pause_before_exit()) wait for a keypress
+    # afterward. The prompt says "continue", not "close this window": it's
+    # equally true whether this just-created console is about to close (the
+    # double-click case) or this is already sitting in an open terminal
+    # (where "continue" just means "return to your prompt") -- deliberately
+    # not trying to tell those two cases apart, see that function's
+    # docstring for why.
     if len(sys.argv) == 1:
         print(NO_ARGS_MESSAGE_TEMPLATE.format(prog=_prog_name()))
         if _should_pause_before_exit():
@@ -2489,7 +2478,7 @@ def main():
                 # still fall through to the plain pause below rather than
                 # skipping it entirely.
                 pass
-            input("Press Enter to close this window...")
+            input("Press Enter to continue...")
         sys.exit(0)
 
     p = argparse.ArgumentParser(

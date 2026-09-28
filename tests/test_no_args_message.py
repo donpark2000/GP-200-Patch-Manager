@@ -8,14 +8,17 @@ share of the Windows build in a non-technical Facebook group).
 
 Covers: the friendly zero-args message appears (instead of argparse's
 error), it's plain-language rather than the dense protocol-notes epilog,
-and the window-closes-too-fast problem is fixed by waiting for a keypress --
-but ONLY for the specific case that actually needs it: a frozen .exe running
-in a console Windows just created for it (the double-click case). Real
-testing the same day found the first version of this fix paused even when
-the .exe was run from an ALREADY-OPEN command prompt, where "press Enter to
-close this window" makes no sense (the window isn't closing). Covers all
-three cases: source-code run, frozen exe in a fresh console, and frozen exe
-run from an existing terminal.
+and it pauses for a keypress on any frozen (PyInstaller) build, never for a
+source-code `python gp200.py` run.
+
+This intentionally does NOT try to tell "double-clicked, fresh console"
+apart from "frozen exe run from an already-open terminal" -- an earlier
+version of this fix tried, via GetConsoleProcessList, specifically to avoid
+pausing in the terminal case (where "press Enter to close this window"
+doesn't make sense). Real-hardware testing the same day found that
+detection unreliable (see _should_pause_before_exit's docstring for why),
+so it was dropped in favor of always pausing when frozen, with the prompt
+worded ("Press Enter to continue...") to make sense in either case instead.
 """
 import contextlib, importlib.util, io, sys
 from pathlib import Path
@@ -32,38 +35,23 @@ def check(name, cond):
         failures.append(name)
 
 
-def run_main_no_args(frozen: bool, prog: str = "gp200.py",
-                      platform: str = "linux", console_process_count=None):
-    """Runs gp200.main() with no CLI args, simulating: whether this is a
-    frozen PyInstaller exe (sys.frozen), what OS it's "running on"
-    (sys.platform), and -- only consulted on a simulated Windows run --
-    how many processes GetConsoleProcessList would report (1 = a fresh
-    console Windows just created for a double-click; >1 = an already-open
-    shell this attached to). Returns (captured_stdout, exit_code,
-    input_call_count)."""
+def run_main_no_args(frozen: bool, prog: str = "gp200.py"):
+    """Runs gp200.main() with no CLI args, as if launched with sys.argv =
+    [prog], optionally simulating a PyInstaller-frozen executable. Returns
+    (captured_stdout, exit_code, input_call_count)."""
     orig_argv = sys.argv
     orig_frozen = getattr(sys, "frozen", None)
     had_frozen_attr = hasattr(sys, "frozen")
-    orig_platform = sys.platform
-    orig_console_count_fn = gp200._windows_console_process_count
 
     input_calls = []
     def fake_input(prompt=""):
         input_calls.append(prompt)
         return ""  # simulates a keypress
 
-    def fake_console_count():
-        if console_process_count is None:
-            raise AssertionError("test bug: GetConsoleProcessList called but "
-                                  "console_process_count wasn't given")
-        return console_process_count
-
     sys.argv = [prog]
     sys.frozen = True if frozen else False
     if not frozen and not had_frozen_attr:
-        del sys.frozen  # match "no sys.frozen attribute at all" exactly, not just False
-    sys.platform = platform
-    gp200._windows_console_process_count = fake_console_count
+        del sys.frozen  # match "no sys.frozen attribute at all" exactly
 
     buf = io.StringIO()
     exit_code = None
@@ -81,8 +69,6 @@ def run_main_no_args(frozen: bool, prog: str = "gp200.py",
     finally:
         builtins.input = orig_builtin_input
         sys.argv = orig_argv
-        sys.platform = orig_platform
-        gp200._windows_console_process_count = orig_console_count_fn
         if had_frozen_attr:
             sys.frozen = orig_frozen
         elif hasattr(sys, "frozen"):
@@ -110,45 +96,22 @@ check("no-args (source): does not dump the dense protocol/status notes at someon
       "who hasn't even picked a command yet",
       "PROTOCOL CREDIT" not in out and "RigSheet" not in out)
 
-# --- frozen exe, freshly-created console (the actual double-click case):
-#     GetConsoleProcessList would report just this one process attached.
-#     This is the ONE case that must pause. ---
-out2, code2, input_calls2 = run_main_no_args(
-    frozen=True, prog="gp200.exe", platform="win32", console_process_count=1)
-check("no-args (frozen exe, fresh console): exits cleanly after the keypress",
+# --- frozen executable, any invocation context: same message, but now it
+#     MUST pause -- deliberately not trying to detect double-click vs an
+#     existing terminal (see module docstring for why that was dropped). ---
+out2, code2, input_calls2 = run_main_no_args(frozen=True, prog="gp200.exe")
+check("no-args (frozen exe): exits cleanly after the keypress",
       code2 == 0)
-check("no-args (frozen exe, fresh console): shows the same friendly message",
+check("no-args (frozen exe): shows the same friendly message",
       "terminal" in out2.lower() and "list-ports" in out2)
-check("no-args (frozen exe, fresh console): uses the exe's own name in the examples",
+check("no-args (frozen exe): uses the exe's own name in the examples",
       "gp200.exe " in out2)
-check("no-args (frozen exe, fresh console): DOES pause for a keypress -- the actual "
-      "fix for the window-closes-instantly problem",
+check("no-args (frozen exe): DOES pause for a keypress -- the fix for the "
+      "window-closes-instantly problem",
       input_calls2 == 1)
-
-# --- frozen exe, run from an ALREADY-OPEN command prompt: this is the bug
-#     found by hand on 2026-09-28 -- GetConsoleProcessList reports more than
-#     one process (the shell plus this one), meaning the console isn't
-#     closing when this process exits, so pausing makes no sense here. ---
-out3, code3, input_calls3 = run_main_no_args(
-    frozen=True, prog="gp200.exe", platform="win32", console_process_count=2)
-check("no-args (frozen exe, existing terminal): exits cleanly, no keypress needed",
-      code3 == 0)
-check("no-args (frozen exe, existing terminal): shows the same friendly message",
-      "terminal" in out3.lower() and "list-ports" in out3)
-check("no-args (frozen exe, existing terminal): does NOT pause -- the window it's "
-      "running in isn't going anywhere, so 'press Enter to close' would be confusing",
-      input_calls3 == 0)
-
-# --- frozen exe, but NOT actually on Windows (a Linux/macOS PyInstaller
-#     build): GetConsoleProcessList doesn't exist there at all, so this must
-#     never even try to call it, and never pauses. ---
-out4, code4, input_calls4 = run_main_no_args(
-    frozen=True, prog="gp200-linux", platform="linux")  # no console_process_count given
-check("no-args (frozen exe, non-Windows): exits cleanly",
-      code4 == 0)
-check("no-args (frozen exe, non-Windows): never calls the Windows-only console check "
-      "(would raise in this test if it tried) and never pauses",
-      input_calls4 == 0)
+check("no-args (frozen exe): the prompt is worded to make sense whether or not "
+      "the window is actually about to close (not 'close this window')",
+      "close this window" not in out2.lower())
 
 print()
 if failures:

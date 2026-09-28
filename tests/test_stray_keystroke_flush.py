@@ -1,10 +1,9 @@
 """Real-hardware testing (2026-09-28) found the no-args "press Enter to
-close this window" pause could be satisfied instantly on a genuine
-double-click -- the window still vanished before the message could be read,
-even though _should_pause_before_exit() correctly decided to pause. The
-likely cause: dismissing the "Windows protected your PC" SmartScreen dialog
-via the Enter key (its default action) can leave that keystroke sitting in
-the brand-new console's input buffer, which input() then reads immediately
+continue" pause could be satisfied instantly on a genuine double-click --
+the window still vanished before the message could be read. The likely
+cause: dismissing the "Windows protected your PC" SmartScreen dialog via
+the Enter key (its default action) can leave that keystroke sitting in the
+brand-new console's input buffer, which input() then reads immediately
 instead of waiting for the user's own keypress.
 
 The fix: flush the console's input buffer (_flush_stray_windows_keystrokes,
@@ -32,13 +31,11 @@ def check(name, cond):
 
 
 def run_paused_case(flush_raises: bool):
-    """Runs main() with no args in the one case that pauses (frozen, fresh
-    console), recording the order flush/input were called in."""
+    """Runs main() with no args on a simulated frozen build (the one case
+    that pauses), recording the order flush/input were called in."""
     orig_argv = sys.argv
     orig_frozen = getattr(sys, "frozen", None)
     had_frozen_attr = hasattr(sys, "frozen")
-    orig_platform = sys.platform
-    orig_console_count_fn = gp200._windows_console_process_count
     orig_flush_fn = gp200._flush_stray_windows_keystrokes
 
     call_order = []
@@ -54,8 +51,6 @@ def run_paused_case(flush_raises: bool):
 
     sys.argv = ["gp200.exe"]
     sys.frozen = True
-    sys.platform = "win32"
-    gp200._windows_console_process_count = lambda: 1  # fresh console -> should pause
     gp200._flush_stray_windows_keystrokes = fake_flush
 
     import builtins
@@ -72,8 +67,6 @@ def run_paused_case(flush_raises: bool):
     finally:
         builtins.input = orig_builtin_input
         sys.argv = orig_argv
-        sys.platform = orig_platform
-        gp200._windows_console_process_count = orig_console_count_fn
         gp200._flush_stray_windows_keystrokes = orig_flush_fn
         if had_frozen_attr:
             sys.frozen = orig_frozen
@@ -109,6 +102,22 @@ check("input() STILL runs even after the flush raised -- fail-safe, not "
       "input" in order2)
 check("exits cleanly even after the flush error",
       code2 == 0)
+
+# --- the flush itself must be a no-op (never touch the Windows-only API)
+#     on a non-Windows frozen build (gp200-linux / gp200-macos), which have
+#     no SmartScreen-dismissal path to begin with. ---
+orig_platform = sys.platform
+sys.platform = "linux"
+try:
+    gp200._flush_stray_windows_keystrokes()  # must not raise
+    flush_didnt_raise = True
+except Exception:
+    flush_didnt_raise = False
+finally:
+    sys.platform = orig_platform
+check("the flush is a safe no-op on non-Windows builds (never touches "
+      "ctypes.windll, which doesn't exist there)",
+      flush_didnt_raise)
 
 print()
 if failures:
