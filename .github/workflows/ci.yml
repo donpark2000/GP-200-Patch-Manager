@@ -28,10 +28,17 @@ jobs:
       - name: Run regression suite
         run: python run_tests.py
 
-  build-windows-exe:
-    name: Build standalone Windows .exe
+  build-executables:
+    name: Build standalone executable (${{ matrix.os }})
     needs: test   # only build from a commit that actually passed every test
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # PyInstaller doesn't cross-compile -- a Windows build has to run on
+        # a Windows machine, a macOS build on macOS, etc. -- so this needs
+        # its own matrix, one native build per platform, not a single job.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -45,8 +52,8 @@ jobs:
         # static analysis misses without this hint -- found by testing the
         # built exe, not assumed.
         run: pyinstaller --onefile --name gp200 --hidden-import mido.backends.rtmidi gp200.py
-      - name: Upload built exe
+      - name: Upload built executable
         uses: actions/upload-artifact@v4
         with:
-          name: gp200-windows-exe
-          path: dist/gp200.exe
+          name: gp200-${{ matrix.os }}
+          path: ${{ matrix.os == 'windows-latest' && 'dist/gp200.exe' || 'dist/gp200' }}
