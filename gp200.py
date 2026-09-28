@@ -2449,6 +2449,26 @@ def _should_pause_before_exit() -> bool:
         return True
 
 
+def _flush_stray_windows_keystrokes():
+    """Discards anything already sitting in the console's keyboard input
+    buffer, via FlushConsoleInputBuffer. Real-hardware testing (2026-09-28)
+    found the pause below could be satisfied instantly -- window still
+    flashing shut before the message could be read, even though
+    _should_pause_before_exit() correctly said to pause. The likely cause:
+    dismissing the "Windows protected your PC" SmartScreen dialog with the
+    Enter key (its default action) can leave that same keystroke sitting in
+    the brand-new console's input buffer, which input() then reads
+    immediately -- consuming the pause before the user ever gets to press
+    their OWN key. A short pause first lets any such trailing key-up/key-down
+    events actually arrive before they're discarded; without it, a flush can
+    race the still-arriving keystroke and miss it."""
+    import ctypes, time
+    time.sleep(0.3)
+    STD_INPUT_HANDLE = -10
+    handle = ctypes.windll.kernel32.GetStdHandle(STD_INPUT_HANDLE)
+    ctypes.windll.kernel32.FlushConsoleInputBuffer(handle)
+
+
 def main():
     # A musician downloading the standalone executable is likely to just
     # double-click it, the way any other Windows program is launched. A
@@ -2462,6 +2482,13 @@ def main():
     if len(sys.argv) == 1:
         print(NO_ARGS_MESSAGE_TEMPLATE.format(prog=_prog_name()))
         if _should_pause_before_exit():
+            try:
+                _flush_stray_windows_keystrokes()
+            except Exception:
+                # Best-effort -- if this can't be done for some reason,
+                # still fall through to the plain pause below rather than
+                # skipping it entirely.
+                pass
             input("Press Enter to close this window...")
         sys.exit(0)
 
