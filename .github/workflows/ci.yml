@@ -37,7 +37,18 @@ jobs:
         # PyInstaller doesn't cross-compile -- a Windows build has to run on
         # a Windows machine, a macOS build on macOS, etc. -- so this needs
         # its own matrix, one native build per platform, not a single job.
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        #
+        # The Linux entry deliberately targets ubuntu-22.04, not
+        # ubuntu-latest (== 24.04 as of this writing). A PyInstaller build
+        # links against the build machine's glibc, and glibc binaries only
+        # run forward -- something built on a newer glibc refuses to run on
+        # an older one ("GLIBC_2.38 not found"), never the other way
+        # around. Building on the oldest Ubuntu GitHub still offers
+        # (20.04 was retired in April 2025) maximizes how old a real
+        # user's Linux install can be and still run this. Found this the
+        # hard way: the ubuntu-latest build ran fine in CI but failed on a
+        # real, somewhat older Linux VM with exactly that GLIBC error.
+        os: [ubuntu-22.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
