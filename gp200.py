@@ -2331,11 +2331,75 @@ def cmd_soak(args):
 
 # ----------------------------------------------------------------- main ----
 
+def _prog_name() -> str:
+    """The name to show in usage examples -- whatever this actually is (a
+    .py, gp200.exe, gp200-linux, gp200-macos), not a hardcoded guess. People
+    running the standalone executable via a downloaded README have no
+    Python in the picture at all, so a hardcoded 'gp200.py' in every example
+    would be actively wrong for them."""
+    return Path(sys.argv[0]).name
+
+
+CLI_EPILOG_TEMPLATE = """\
+Quick examples:
+  {prog} list-ports              # see if this can find your GP-200
+  {prog} list                    # print every patch name (256 slots)
+  {prog} export --all            # back up every patch to a .zip file
+  {prog} upload backup.zip 1-A   # write patches back onto the device
+
+This has only been tested against one GP-200 -- back up your patches
+(export --all) before uploading or overwriting anything.
+
+Full details, protocol notes, and source:
+  https://github.com/donpark2000/GP-200-Patch-Manager
+"""
+
+NO_ARGS_MESSAGE_TEMPLATE = """\
+GP-200 Patch Manager
+=====================
+This is a command-line tool -- it runs inside a terminal window, not by
+double-clicking the icon. To use it:
+
+  1. Open a terminal (on Windows: search "cmd" or "PowerShell" in the
+     Start menu; on Linux/macOS: your usual Terminal app).
+  2. Go to the folder this program is in, e.g.:
+       cd Downloads
+  3. Try one of these:
+       {prog} list-ports              (see if it finds your GP-200)
+       {prog} list                    (see every patch name on the device)
+       {prog} export --all            (back up every patch to a .zip file)
+       {prog} upload backup.zip 1-A   (write patches back onto the device)
+
+This has only been tested against one GP-200 -- back up your patches
+(export --all) before uploading or overwriting anything.
+
+For every command and option: {prog} --help
+"""
+
+
 def main():
+    # A musician downloading the standalone executable is likely to just
+    # double-click it, the way any other Windows program is launched. A
+    # console app with no arguments and argparse's default `required=True`
+    # subparser error exits immediately with a usage message -- which, for
+    # a double-clicked .exe, means a window flashes open and closes before
+    # anyone can read it. Handle this case explicitly with a plain-language
+    # message instead of the technical argparse error, and (only when
+    # actually running as a frozen .exe -- see PyInstaller's `sys.frozen`)
+    # wait for a keypress so the window doesn't vanish. A source-code user
+    # running `python gp200.py` with no args still sees the same message,
+    # just without the pause -- their terminal was already there and isn't
+    # going anywhere.
+    if len(sys.argv) == 1:
+        print(NO_ARGS_MESSAGE_TEMPLATE.format(prog=_prog_name()))
+        if getattr(sys, "frozen", False):
+            input("Press Enter to close this window...")
+        sys.exit(0)
+
     p = argparse.ArgumentParser(
         description="Command-line patch manager for the Valeton GP-200.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__)
+        epilog=CLI_EPILOG_TEMPLATE.format(prog=_prog_name()))
     p.add_argument("--port", help="substring of the MIDI port name, if auto-detect finds none or too many")
     p.add_argument("-d", "--debug", action="store_true",
                     help="print every SysEx message sent and received, including ones that don't match "
