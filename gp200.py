@@ -533,6 +533,85 @@ def parse_preset_name(sysex_msg: bytes) -> str:
     return extract_name_field(decoded)
 
 
+# ---- User-IR / SnapTone (NAM) slot-reference detection (PROTOCOL_NOTES.md,
+# Finding 11, 2026-09-28/29). A patch's 11 effect blocks each store a plain
+# 4-byte model code picking which cab/amp/drive that position uses -- and a
+# sub-range of those codes doesn't mean a specific built-in sound at all,
+# it means "whatever the user loaded into User-IR/SnapTone slot N". Offsets
+# and code ranges below are read (not copied) from two already-credited
+# reference projects, not from any new hardware capture:
+#   - Effect block layout in our own nibble-decoded `decoded` representation:
+#     GP200 Studio's PRSTDecoder confirms file offset 0xA0 (11 x 72-byte
+#     blocks, 4-byte LE model code at block offset 8) against real .prst
+#     files; its SysExCodec.parsePresetFromDecoded confirms the SAME blocks
+#     sit at 120 (0xA0 - 0x28) in the raw-dump layout this tool's `decoded`
+#     already uses elsewhere (extract_name_field's offset 28 is that same
+#     -0x28 shift applied to the file's name offset 0x44).
+#   - User-IR code range (CAB module, codes 0x0A100000+, 30 entries, all
+#     named generically "User IR"): GP200 Studio's own effect-code table,
+#     cross-checked against a comment in its connect sequence noting the
+#     device exposes "30 User-IR slot names" via its own SysEx query.
+#   - SnapTone/NAM code range: GP200 Studio's table has no entries for
+#     these; RigSheet's independently reverse-engineered table does --
+#     5 codes tagged module AMP (0x0F000000-0x0F000004) and 5 tagged
+#     module DST (0x0F000005-0x0F000009), every one named "SnapTone" with
+#     the description "For importing and using the .nam file". Both ranges
+#     address the same 5 physical capture slots (0-4), just from either
+#     chain position, hence the shared local numbering below.
+# DUMP_-prefixed to keep these distinct from the file-offset-based
+# EFFECT_BLOCK_START/EFFECT_BLOCK_SIZE locals used elsewhere in this file
+# (prst_to_preset and the raw-dump-diff offset namer both use 0xA0, the
+# .prst FILE layout's block start -- a different number from this one even
+# though the block/field sizes are identical). Same name, different meaning,
+# so DUMP_ makes clear these are decoded-dump-offset-based (0x78 = 0xA0 - 0x28).
+DUMP_EFFECT_BLOCK_COUNT = 11
+DUMP_EFFECT_BLOCK_START = 0x78   # 120: file offset 0xA0, shifted -0x28 into `decoded`
+DUMP_EFFECT_BLOCK_SIZE = 0x48    # 72 bytes per block, same in both layouts
+DUMP_EFFECT_MODEL_OFFSET = 8     # LE uint32 model code, within a block
+
+USER_IR_BASE = 0x0A100000
+USER_IR_COUNT = 30
+SNAPTONE_AMP_BASE = 0x0F000000
+SNAPTONE_DST_BASE = 0x0F000005
+SNAPTONE_COUNT = 5
+
+
+def describe_ir_nam_dependency(effect_id: int) -> str | None:
+    """Human-readable note if `effect_id` (a decoded effect block's model
+    code) means "whatever is loaded into User-IR/SnapTone slot N" rather
+    than a specific built-in sound. Returns None for an ordinary built-in
+    effect code, which is the vast majority of them."""
+    if USER_IR_BASE <= effect_id < USER_IR_BASE + USER_IR_COUNT:
+        return f"User-IR slot {effect_id - USER_IR_BASE}"
+    if SNAPTONE_AMP_BASE <= effect_id < SNAPTONE_AMP_BASE + SNAPTONE_COUNT:
+        return f"SnapTone (NAM) slot {effect_id - SNAPTONE_AMP_BASE}"
+    if SNAPTONE_DST_BASE <= effect_id < SNAPTONE_DST_BASE + SNAPTONE_COUNT:
+        return f"SnapTone (NAM) slot {effect_id - SNAPTONE_DST_BASE}"
+    return None
+
+
+def find_ir_nam_dependencies(decoded: bytes) -> list[str]:
+    """Scan a decoded dump's 11 effect blocks for any User-IR/SnapTone
+    references (see describe_ir_nam_dependency). Returns a list of
+    descriptions in chain-block order, empty if the patch uses none --
+    which is the common case, so callers should treat an empty list as
+    "nothing to report" rather than an error. Defensive about a short or
+    malformed dump: a block that doesn't fully fit is silently skipped
+    rather than raising, since this is an informational note, not
+    something export/upload's correctness depends on."""
+    found = []
+    for i in range(DUMP_EFFECT_BLOCK_COUNT):
+        base = DUMP_EFFECT_BLOCK_START + i * DUMP_EFFECT_BLOCK_SIZE
+        end = base + DUMP_EFFECT_MODEL_OFFSET + 4
+        if end > len(decoded):
+            continue
+        effect_id = int.from_bytes(decoded[base + DUMP_EFFECT_MODEL_OFFSET:end], "little")
+        desc = describe_ir_nam_dependency(effect_id)
+        if desc:
+            found.append(desc)
+    return found
+
+
 def assemble_chunks(chunks) -> bytes:
     def offset_of(msg):
         # Offsets are split 7 bits per SysEx data byte (each byte must be
@@ -1561,6 +1640,7 @@ def cmd_export(args):
         if slots is not None:
             entries = {}
             skipped_labels = []
+            ir_nam_by_label = {}
             started = time.monotonic()
             for slot in slots:
                 label = slot_to_label(slot)
@@ -1568,6 +1648,9 @@ def cmd_export(args):
                     decoded = dev.read_dump_confirmed(slot)
                     name = extract_name_field(decoded) or label
                     print(f"{label}: {name!r} ({len(decoded)} bytes)")
+                    deps = find_ir_nam_dependencies(decoded)
+                    if deps:
+                        ir_nam_by_label[label] = deps
                     data = normalize_export_dynamic_fields(build_prst_from_dump(decoded, name, skeleton))
                     entries[f"{label}_{safe_filename(name)}.prst"] = data
                 except TimeoutError as e:
@@ -1596,6 +1679,24 @@ def cmd_export(args):
                       "the gap is NOT preserved, so every patch after it would land ONE SLOT "
                       "EARLIER than where it actually came from. Re-run export to fill the "
                       "gap(s) before using this zip to restore.")
+            # This backup only carries the model code that means "whatever's in
+            # User-IR/SnapTone slot N", never the IR/NAM content itself (see
+            # PROTOCOL_NOTES.md Finding 11) -- so restoring these patches later
+            # sounds right only on the same device, with nothing reloaded into
+            # those slots since. Flag it now, while it's still actionable,
+            # rather than as a "why does this patch sound different" surprise
+            # after a factory reset or a move to a new unit.
+            if ir_nam_by_label:
+                total_refs = sum(len(v) for v in ir_nam_by_label.values())
+                print(f"NOTE: {len(ir_nam_by_label)} patch(es) reference {total_refs} "
+                      "User-IR/SnapTone(NAM) slot(s) -- this backup only stores WHICH slot, "
+                      "not the IR/NAM content itself:")
+                for label, deps in ir_nam_by_label.items():
+                    print(f"  {label}: {', '.join(deps)}")
+                print("  Restoring these on a DIFFERENT device, or after that slot's IR/NAM "
+                      "has been reloaded with something else, will sound different -- with no "
+                      "warning either way. See PROTOCOL_NOTES.md (Finding 11) / the README's "
+                      "'Known limitations' section.")
         else:
             slot = label_to_slot(args.slot)
             try:
@@ -1604,6 +1705,14 @@ def cmd_export(args):
                 sys.exit(f"Couldn't export {args.slot}: {e}")
             name = extract_name_field(decoded) or args.slot
             print(f"{args.slot}: {name!r} ({len(decoded)} bytes)")
+            deps = find_ir_nam_dependencies(decoded)
+            if deps:
+                print(f"NOTE: this patch references {', '.join(deps)} -- this backup only "
+                      "stores WHICH slot, not the IR/NAM content itself. Restoring it on a "
+                      "DIFFERENT device, or after that slot's IR/NAM has been reloaded with "
+                      "something else, will sound different -- with no warning either way. "
+                      "See PROTOCOL_NOTES.md (Finding 11) / the README's 'Known limitations' "
+                      "section.")
             data = normalize_export_dynamic_fields(build_prst_from_dump(decoded, name, skeleton))
             out_path = Path(args.out) if args.out else Path(f"{args.slot}_{safe_filename(name)}.prst")
             if not confirm_overwrite_file(out_path, args.force):

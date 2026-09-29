@@ -1402,3 +1402,88 @@ If instead both commands show prompt replies per-slot, the slowness isn't
 timeout-related at all and needs a different explanation. Either way,
 nothing here is fixed yet -- this section exists so the eventual real
 numbers land next to the hypothesis they're testing, not lost in chat.
+
+**Resolved (2026-09-29), with real-hardware evidence.** Two full-256-slot
+traces on the actual device (`list -d`, `export --all -d`) confirmed the
+first half of the hypothesis exactly, with zero exceptions in either
+direction:
+- Every single name-only (`sub=0x20`) request's *first* attempt timed out
+  the full 2.0s `READ_TIMEOUT_S` budget, succeeding only on the automatic
+  retry roughly 15-16ms later. 256 slots, 256 full timeouts, no
+  exceptions.
+- Every full-dump (`sub=0x10`) request -- the same one `read_dump`/`export`
+  already use -- succeeded on its *first* attempt in under 20ms. 256
+  slots, zero timeouts.
+
+So the timing problem was real, request-type-specific, and reproduced
+perfectly -- but the fix taken wasn't "give name-only reads a shorter
+timeout" (the originally planned next step above). A shorter timeout would
+still pay that timeout on every slot, just a smaller one; it doesn't
+explain *why* `sub=0x20`'s first attempt fails at all, and chasing that
+root cause further wasn't judged worth it against a simpler fix that
+sidesteps the bad request type entirely (this project's stated preference
+throughout: provably-correct simple fixes over unverified heuristics).
+Instead, `list` was switched to a new `Device.read_name_via_dump()`, which
+just calls the already-proven-fast `read_dump()` and keeps only the name,
+discarding the rest. Confirmed by the user on real hardware: "The whole
+list was printed in 3 seconds" (down from roughly 8.5 minutes).
+
+Deliberately scoped narrow: `read_name`'s other call sites (`cmd_read`,
+`confirm_overwrite`, `verify_write`, `diag_write`'s two calls) were left
+using the old name-only request, since none of those were part of what was
+slow or what was asked to be fixed. Switching them to the same approach is
+an easy, low-risk follow-up if `read_name`'s slow-first-attempt behavior
+ever matters somewhere else, but wasn't done here.
+
+*Still genuinely open, deprioritized:* **why** `sub=0x20`'s first attempt
+reliably fails while `sub=0x10`'s doesn't. Also noticed but not chased: a
+"6 pending messages flushed" count that showed up consistently on every
+slot in the `list -d` trace, unexplained. Neither is blocking anything.
+
+## `export` warns about patches that depend on a User-IR/SnapTone slot (2026-09-29)
+
+Direct follow-up to Finding 11's closing paragraph, once the `list` speed
+fix above was confirmed: "teach `export`/`list` to decode the model code
+in each effect block and print when a patch depends on a User-IR or
+SnapTone slot." This doesn't move any IR/NAM content (still out of scope,
+per Finding 11 -- no GP-200 tool does that) and doesn't change what gets
+written to the `.prst`/zip; it's purely an export-time heads-up so the
+dependency is visible right when it's still actionable, not discovered
+later as an unexplained sound difference.
+
+`find_ir_nam_dependencies(decoded)` scans a decoded dump's 11 effect
+blocks (same block layout Finding 11 already established: 72-byte blocks
+starting at decoded-dump offset 0x78 -- file offset 0xA0 shifted -0x28 --
+4-byte LE model code at block offset 8) and, for each block whose model
+code falls in the User-IR (`0x0A100000`-`0x0A10001D`) or SnapTone
+(`0x0F000000`-`0x0F000004` amp-position, `0x0F000005`-`0x0F000009`
+drive-position) ranges, reports which slot it points at.
+
+`cmd_export` calls this for every patch it reads and, when a patch has any
+such dependency:
+- **Single-slot export**: prints an inline `NOTE:` line right after that
+  patch's normal export line, naming what it depends on.
+- **Batch export** (`--all`/`--start`/`--end`): collects findings across
+  the whole run and prints ONE end-of-run summary block naming each
+  affected slot and its dependency, mirroring the existing
+  `skipped_labels` gap-warning's pattern (collect during the loop, one
+  clear block at the end) rather than interleaving a note per slot into
+  256 lines of otherwise-routine output.
+
+A clean patch with no such dependency (the common case) produces no extra
+output at all in either mode. Covered by
+`tests/test_ir_nam_dependency_warning.py`: the code-range boundaries in
+`describe_ir_nam_dependency`, `find_ir_nam_dependencies` scanning a
+realistic multi-block dump (including that a short/malformed dump is
+skipped rather than raising, since this is informational and not
+something export's correctness depends on), and both the single-slot and
+batch `cmd_export` output paths, in both the dependent and clean cases.
+
+One internal-naming note for future readers of `gp200.py`: this feature's
+constants are named `DUMP_EFFECT_BLOCK_START`/`DUMP_EFFECT_BLOCK_SIZE`
+(decoded-dump-offset-based, 0x78), deliberately prefixed to avoid confusion
+with two unrelated, pre-existing *local* variables of the same un-prefixed
+names elsewhere in the file (`prst_to_preset`'s `.prst`-file decoder, and
+the raw-dump-diff offset namer) that use the FILE-offset layout (0xA0) for
+the same-shaped 11×72-byte blocks. Same shape, different base offset,
+easy to confuse -- hence `DUMP_`.
