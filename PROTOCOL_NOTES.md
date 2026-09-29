@@ -1715,3 +1715,122 @@ that correctly since it distinguishes the two.
 Tests: `test_debug_timing.py`'s existing `cmd_list` timeout-counting
 scenario gained checks that the failed slot's label still prints and
 that its name column carries the new unmistakable error text.
+
+## The 7/256 `export --all` failure run: `reread` isolates it to two bytes, cables muddy the cause (2026-09-29)
+
+The "a few failures" run finally showed up, and it was worse than the
+3/255 that prompted the tries=5->7 + delay change above: 7/256 slots
+(23B, 25B, 29C, 46C, 47B, 55A, 55D) failed to confirm even at tries=7.
+Wall time (69.1s for the read loop) was also notably higher than `list`'s
+~3s for the same 256 slots -- expected in part (every slot here pays for
+a confirmed multi-read, `list` pays for one unconfirmed read; and the
+7 outright failures each burn the full 250/500/500/500ms delay ladder,
+~12s of the 69s on their own), but not fully explained by that alone,
+suggesting the run itself was noisier than usual, not just slower by
+design.
+
+**`reread --count 15 --debug` on 5 of the 7 failed slots (23B, 25B, 29C,
+46C, 47B -- 55A/55D were deleted before upload and not re-captured) turned
+up something the whole "per-read glitch, retry until two agree" model had
+missed: every single disagreement, across all 5 slots x 15 reads = 75
+read-pairs, landed on exactly one or both of two file offsets -- 0x0043
+and 0x009F -- and NEVER anywhere else in the other ~1174 bytes of the
+dump.** 0x009F was already a known, previously-flagged finding (see
+`describe_prst_offset`'s comment on the 0x8C-0xA0 range, from earlier
+`calibrate-settle` testing). 0x0043 was not previously named or
+flagged at all -- it sits immediately before the "patch name" field
+(0x44), the same way 0x9F sits immediately before the effect-block
+section (0xA0): both are the last byte of a section, right at a boundary.
+
+Two distinct behaviors showed up across the 5 slots, not one uniform
+noise rate:
+  - **25B, 47B**: read #1's value recurs in the large majority of
+    reads (12/15, 13/15), with a handful of isolated garbage reads
+    scattered in -- consistent with the previously-measured ~12-15%
+    per-read glitch rate this whole retry design is built around.
+  - **23B, 29C, 46C**: read #1's value essentially never recurs again
+    (0/13, 0/14, 1/14 of the later reads match it). A different value
+    (often 0x00, matching `describe_prst_offset`'s own "always 0x00 in
+    every real sample seen so far" comment) dominates the remaining
+    reads, but several *other* distinct garbage values also appear
+    scattered among them -- not "one true value plus rare noise," but a
+    genuinely unstable stream of several different values.
+
+The garbage values themselves aren't uniformly random across 0-255 --
+they cluster into two narrow bands (0x35-0x38 and 0xB5-0xB8: the same
+four low values, with and without bit 7 set) rather than looking like
+generic transmission-line corruption. Combined with the fact that
+literally nothing outside these two boundary bytes ever disagreed in 75
+read-pairs, this now looks less like "the transport occasionally mangles
+a byte" and more like these two specific fields carry some small piece
+of live/transient device-internal state (a counter, a flag) that isn't
+meaningful stored patch content -- which would mean no amount of
+retrying converges on a "true" value at these positions, because there
+may not be one. This doesn't invalidate the tries=7 + delay change above
+(it still helps for the 25B/47B-style genuine rare-noise case, and costs
+nothing when it doesn't apply), but it does mean that change alone can't
+fix the 23B/29C/46C-style case -- a real fix there would mean treating
+0x43 (and reconsidering 0x9F, which was deliberately kept out of
+`VERIFY_IGNORE_OFFSETS` before on the theory it might be real data) as
+fields that don't need to agree at all, similar to how the tail-block
+quirk is already handled. Not done here -- this needs more confidence
+about what these bytes actually are before ignoring them, and the user
+wanted to discuss implications before more retry-logic changes anyway.
+
+**Then the cable experiment:** the user unplugged the guitar cable
+(input) and XLR cable (output) and ran `export --all` twice -- both
+perfect, 256/256, and faster. At the ~2.7%-per-slot rate the bad run
+implied, two clean 256-slot runs by chance alone would be roughly 1-in-a-
+million, so this looked like strong evidence that the audio I/O cables
+were somehow involved (a ground loop or noise coupling disturbing
+whatever's leaking into those two boundary bytes was the working theory
+-- plausible since it's a mechanism that could disturb small pieces of
+live device state without touching the other 1174 bytes at all).
+
+**Then the control that undercuts that theory:** cables were plugged
+back in, `export --all` run twice more -- both ALSO perfect. If cable
+presence were the actual cause, reconnecting them should have brought
+the failures back; it didn't. Current state after 1 bad run followed by
+5 consecutive clean runs (3 cables-out, 2 cables-back-in): something
+changed around the time of that first bad run, but it's no longer
+possible to tell whether it was the cables specifically, a marginal
+connector (audio or USB) getting reseated by the physical act of
+plugging/unplugging, static discharge, or pure chance that happened to
+land in that one run. **Unresolved, not reproducing.** If it recurs,
+worth noting next time: how long since power-on, whether anything was
+plugged/unplugged beforehand, and ideally trying `reread` on the
+specific failing slot(s) again before touching anything, to see whether
+the same two offsets (0x43/0x9F) are still the only things unstable.
+
+## `export`: a visible progress indicator, and skip message simplified again (2026-09-29)
+
+With the console noise cleaned up over two earlier rounds, a long
+`export --all` now prints almost nothing for the ~60-90s it takes to
+read 256 slots -- direct feedback: *"the command just seems to be hung
+for a few seconds... a simple progress bar. Maybe '.' printed across the
+screen on the same line for every patch."* Added exactly that: one `.`
+per slot (flushed immediately so it appears as it happens, not buffered
+to the end), `--debug` only (in `--debug` mode the existing per-slot
+`"{label}: {name!r} (...)"` line already shows progress, so the two
+don't get mixed on the same line). A skipped slot still gets its own
+full line -- the code prints a newline first to end the current dot-run
+before the skip message, so it doesn't get swallowed into a run of dots
+-- and the loop ends with one more newline so the final "Wrote N
+patches..." summary doesn't land at the end of a dot-line.
+
+Also folded in a still-outstanding wording request from a couple of
+messages earlier: *"the skipped message could still be simpler.
+Something like 'Error reading 47B - skipped'."* The batch skip line
+dropped `describe_read_failure()`'s reason from the default message
+entirely (it's `--debug`-only detail now, via the same `{detail}`
+suffix export already uses elsewhere) and now reads exactly
+`f"Error reading {label} - skipped{detail}"`. The single-slot export
+failure message (a `sys.exit`, the only line that run produces) was
+left alone -- more detail there is fine since it's not competing with
+255 other lines.
+
+Tests: `test_export_quiet_output.py` gained checks for the dot count,
+the newline before the summary, no dot-noise mixed into `--debug`
+output, and the new skip-message wording (replacing the now-stale check
+for `describe_read_failure`'s phrase, which no longer appears by
+default).

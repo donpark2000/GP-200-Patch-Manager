@@ -1772,6 +1772,14 @@ def cmd_export(args):
                     # every patch. The summary at the end should be enough."
                     if args.debug:
                         print(f"{label}: {name!r} ({len(decoded)} bytes)")
+                    else:
+                        # A simple progress indicator (2026-09-29, direct
+                        # feedback: with the per-slot line gone, a long
+                        # export can look hung for several seconds with
+                        # nothing at all on screen). One dot per slot, same
+                        # line, flushed immediately so it actually appears
+                        # as it happens rather than buffering.
+                        print(".", end="", flush=True)
                     deps = find_ir_nam_dependencies(decoded)
                     if deps:
                         ir_nam_by_label[label] = deps
@@ -1780,8 +1788,17 @@ def cmd_export(args):
                     entries[f"{label}_{safe_filename(name)}.prst"] = data
                 except TimeoutError as e:
                     detail = f" ({e})" if args.debug else ""
-                    print(f"{label}: skipped -- {describe_read_failure(e)}{detail}")
+                    if not args.debug:
+                        print()  # end the current dot-line before the skip message
+                    # 2026-09-29, direct feedback: "the skipped message
+                    # could still be simpler. Something like 'Error reading
+                    # 47B - skipped'." Dropped describe_read_failure()'s
+                    # reason from the default message entirely -- the raw
+                    # exception detail is still available with --debug.
+                    print(f"Error reading {label} - skipped{detail}")
                     skipped_labels.append(label)
+            if not args.debug:
+                print()  # move off the dot-line before the summary below
             elapsed = time.monotonic() - started
             write_zip(entries, out_path)
             # Same unconditional total as `list` prints (2026-09-29) -- these

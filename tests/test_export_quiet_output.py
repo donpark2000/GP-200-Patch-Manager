@@ -141,6 +141,15 @@ check("export (no -d): the per-slot progress line (name + byte count) is ALSO go
 check("export (no -d): the final 'Wrote N patches...' summary is STILL there -- this is "
       "a noise fix, not a silence-everything regression",
       "Wrote 2 patches" in out)
+# 2026-09-29, direct feedback: "now that we have cleaned up the output the
+# command just seems to be hung for a few seconds... a simple progress
+# bar... printed across the screen on the same line for every patch."
+check("export (no -d): a simple one-dot-per-slot progress indicator is "
+      "printed so a long export doesn't look hung with zero output",
+      out.count(".") >= 2)
+check("export (no -d): the dot-line is followed by a newline before the "
+      "summary, not run together on the same line",
+      "..\nWrote 2 patches" in out or ".\nWrote 2 patches" in out)
 if out_path.exists():
     out_path.unlink()
 
@@ -164,6 +173,11 @@ check("export (-d): read_dump_confirmed's retry-diagnostic line for the genuinel
       "read_dump_confirmed(1B)" in out2)
 check("export (-d): the per-slot progress line is back too",
       "1A:" in out2 and "1B:" in out2)
+check("export (-d): no dot-progress noise mixed into --debug output -- the "
+      "per-slot lines already show progress there (the dot branch is the "
+      "`else` of `if args.debug`, so it's structurally unreachable here; "
+      "this just confirms nothing else introduced a stray one)",
+      ".." not in out2)
 if out_path2.exists():
     out_path2.unlink()
 
@@ -213,11 +227,17 @@ buf3 = io.StringIO()
 with contextlib.redirect_stdout(buf3):
     gp200.cmd_export(make_args(start="1-A", end="1-A", out=str(out_path3), debug=False))
 out3 = buf3.getvalue()
-check("export (no -d): a slot that never confirms is reported in plain language",
-      "couldn't get a reliable read" in out3)
+check("export (no -d): a slot that never confirms is reported plainly "
+      "(2026-09-29, round 3: \"the skipped message could still be simpler. "
+      "Something like 'Error reading 47B - skipped'\")",
+      "Error reading 1A - skipped" in out3)
 check("export (no -d): ...NOT with the raw internal retry-count wording "
       "(2026-09-29: \"meaningless to a guitar player\")",
       "never agreed" not in out3)
+check("export (no -d): ...and not even describe_read_failure's own "
+      "plain-language reason anymore -- round 3 dropped that too, it's "
+      "--debug-only detail now",
+      "couldn't get a reliable read" not in out3)
 if out_path3.exists():
     out_path3.unlink()
 
