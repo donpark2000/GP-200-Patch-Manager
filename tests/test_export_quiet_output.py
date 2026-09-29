@@ -69,8 +69,15 @@ os.chdir(_tmp)
 
 skeleton = gp200.resolve_skeleton_bytes(None)
 dump_clean = bytes(skeleton)[gp200.CONTENT_FILE_START:gp200.CHECKSUM_OFF]
+# Block 0 param 0 (0xA0+0x0C), not 0x9F: as of 2026-09-29, a difference
+# confined to 0x43/0x9F (DEAD_BYTE_FILE_OFFSETS) is no longer treated as a
+# disagreement at all (a real write test showed the device enforces 0x00
+# there regardless of what's sent, so read_dump_confirmed no longer retries
+# over it) -- using it here would defeat the "1-B genuinely needs a retry"
+# setup this file relies on throughout.
+REAL_DIFF_OFFSET = 0xA0 + 0x0C
 dump_glitch1 = bytearray(dump_clean)
-dump_glitch1[0x9F - gp200.CONTENT_FILE_START] = 0xB7  # a real, previously-seen corrupted value
+dump_glitch1[REAL_DIFF_OFFSET - gp200.CONTENT_FILE_START] = 0xB7
 dump_glitch1 = bytes(dump_glitch1)
 
 orig_device = gp200.Device
@@ -188,7 +195,7 @@ if out_path2.exists():
 #     still offer that raw detail when --debug is on. ---
 def _dump_with_marker(value: int) -> bytes:
     buf = bytearray(dump_clean)
-    buf[0x9F - gp200.CONTENT_FILE_START] = value  # same real-world offset as elsewhere in this suite
+    buf[REAL_DIFF_OFFSET - gp200.CONTENT_FILE_START] = value  # same ordinary content offset as above
     return bytes(buf)
 
 

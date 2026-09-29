@@ -1,4 +1,4 @@
-import argparse, importlib.util, io, contextlib, os, tempfile, atexit, shutil
+import argparse, importlib.util, io, contextlib, os, tempfile, atexit, shutil, time
 from pathlib import Path
 
 GP200_PATH = str(Path(__file__).resolve().parent.parent / "gp200.py")
@@ -68,7 +68,7 @@ class FakeDevBase:
 
 # --- always clean: 0/N failures, delay never changes, no exit/error ---
 class FakeDevClean(FakeDevBase):
-    def verify_write_full(self, slot, fb, skel):
+    def verify_write_full(self, slot, fb, skel, ignore_dead_bytes=True):  # accepts, ignores -- these fakes already do a strict (unfiltered) comparison
         roundtrip = gp200.build_prst_from_dump(dump_clean, "x", skel)
         return (len(gp200.diff_prst_content(fb, roundtrip)) == 0), [], gp200.prst_file_name(roundtrip), roundtrip
 
@@ -90,7 +90,7 @@ check("soak: closes the device", dev1.closed)
 #     no SystemExit even though failures occurred.
 FAIL_ATTEMPTS = {3, 7}
 class FakeDevSomeFail(FakeDevBase):
-    def verify_write_full(self, slot, fb, skel):
+    def verify_write_full(self, slot, fb, skel, ignore_dead_bytes=True):  # accepts, ignores -- these fakes already do a strict (unfiltered) comparison
         dump = dump_bad if self.write_calls in FAIL_ATTEMPTS else dump_clean
         roundtrip = gp200.build_prst_from_dump(dump, "x", skel)
         mismatches = gp200.diff_prst_content(fb, roundtrip)
@@ -127,7 +127,7 @@ class FakeDevFailThenStored(FakeDevBase):
     def __init__(self):
         super().__init__()
         self.read_calls = 0
-    def verify_write_full(self, slot, fb, skel):
+    def verify_write_full(self, slot, fb, skel, ignore_dead_bytes=True):  # accepts, ignores -- these fakes already do a strict (unfiltered) comparison
         roundtrip = gp200.build_prst_from_dump(dump_bad, "x", skel)
         mismatches = gp200.diff_prst_content(fb, roundtrip)
         return (len(mismatches) == 0), mismatches, gp200.prst_file_name(roundtrip), roundtrip
@@ -149,7 +149,7 @@ check("soak --confirm-reads: a discrepancy that survives every re-read is report
 # --- --confirm-reads: a discrepancy that turns out to be transient (every
 #     confirmation re-read now matches the SOURCE file instead) ---
 class FakeDevFailThenTransient(FakeDevBase):
-    def verify_write_full(self, slot, fb, skel):
+    def verify_write_full(self, slot, fb, skel, ignore_dead_bytes=True):  # accepts, ignores -- these fakes already do a strict (unfiltered) comparison
         roundtrip = gp200.build_prst_from_dump(dump_bad, "x", skel)
         mismatches = gp200.diff_prst_content(fb, roundtrip)
         return (len(mismatches) == 0), mismatches, gp200.prst_file_name(roundtrip), roundtrip
@@ -198,6 +198,49 @@ with contextlib.redirect_stdout(out9):
     gp200.cmd_soak(make_args(count=10, settle=1.0))
 check("soak: --confirm-reads defaults to off (no read_dump calls, no 'Confirming' text)",
       "Confirming" not in out9.getvalue())
+
+# --- Regression guard (2026-09-29): cmd_soak exists specifically to
+#     characterize write reliability across many cycles -- it must call the
+#     REAL verify_write_full with ignore_dead_bytes=False, so a mismatch
+#     confined to 0x43/0x9F (DEAD_BYTE_FILE_OFFSETS) still counts as a real
+#     failure here, unlike the relaxed default an ordinary `upload` now
+#     gets. Uses the real Device.verify_write_full (not a hand-rolled fake),
+#     so this actually exercises cmd_soak's own call site. ---
+class FakeDevRealVerifyDeadByte:
+    # orig_device, not gp200.Device -- by this point gp200.Device has been
+    # repeatedly reassigned to a lambda by earlier scenarios.
+    verify_write_full = orig_device.verify_write_full
+    read_dump_confirmed = orig_device.read_dump_confirmed
+    _dbg = orig_device._dbg
+
+    def __init__(self):
+        self.debug = False
+        self._t0 = time.monotonic()
+        self.closed = False
+        bad = bytearray(dump_clean)
+        bad[0x43 - gp200.CONTENT_FILE_START] ^= 0xFF
+        bad[0x9F - gp200.CONTENT_FILE_START] ^= 0xFF
+        self.dump = bytes(bad)  # differs from file_bytes ONLY at the dead-byte offsets
+
+    def write_slot(self, slot, fb, currently_active, commit=False, settle_s=1.0):
+        pass
+
+    def read_dump(self, slot):
+        return self.dump  # same every time -> read_dump_confirmed confirms on read 2
+
+    def close(self):
+        self.closed = True
+
+
+dev_dead_soak = FakeDevRealVerifyDeadByte()
+gp200.Device = lambda *a, **kw: dev_dead_soak
+out_dead_soak = io.StringIO()
+with contextlib.redirect_stdout(out_dead_soak):
+    gp200.cmd_soak(make_args(count=3))
+check("soak: a mismatch confined to DEAD_BYTE_FILE_OFFSETS is still counted as a "
+      "real failure here, not silently treated as OK -- proves ignore_dead_bytes=False "
+      "is actually reaching the real verify_write_full",
+      "3/3 failed" in out_dead_soak.getvalue())
 
 gp200.Device = orig_device
 gp200.Path.read_bytes = orig_read_bytes

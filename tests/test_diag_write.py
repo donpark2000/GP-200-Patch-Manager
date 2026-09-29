@@ -19,15 +19,20 @@ os.chdir(_tmp)  # isolate any files this test writes
 
 skeleton = gp200.resolve_skeleton_bytes(None)
 dump_clean = bytes(skeleton)[gp200.CONTENT_FILE_START:gp200.CHECKSUM_OFF]
-# 0x9F (not 0x28, which falls inside the intentionally-ignored device-owned
-# range -- see VERIFY_IGNORE_OFFSETS / RAW_DUMP_IGNORE_OFFSETS) so these
-# fixtures actually differ somewhere raw_dumps_agree treats as a real
-# difference, not somewhere it now correctly ignores.
+# Block 0 param 0 (0xA0 + 0x0C) -- not 0x28 (falls inside the
+# intentionally-ignored device-owned range, VERIFY_IGNORE_OFFSETS /
+# RAW_DUMP_IGNORE_OFFSETS) and, as of 2026-09-29, not 0x43/0x9F either
+# (DEAD_BYTE_FILE_OFFSETS -- raw_dumps_agree now correctly ignores a
+# difference confined to those two as well, since a real write test showed
+# the device enforces 0x00 there regardless of what's sent). This picks an
+# ordinary content offset so these fixtures actually differ somewhere
+# raw_dumps_agree still treats as a real difference.
+REAL_DIFF_OFFSET = 0xA0 + 0x0C
 dump_a = bytearray(skeleton)
-dump_a[0x9F] = 0x11
+dump_a[REAL_DIFF_OFFSET] = 0x11
 dump_a = bytes(dump_a)[gp200.CONTENT_FILE_START:gp200.CHECKSUM_OFF]
 dump_b = bytearray(skeleton)
-dump_b[0x9F] = 0x22
+dump_b[REAL_DIFF_OFFSET] = 0x22
 dump_b = bytes(dump_b)[gp200.CONTENT_FILE_START:gp200.CHECKSUM_OFF]
 
 template_path = Path("diag_template.prst")

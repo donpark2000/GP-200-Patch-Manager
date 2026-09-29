@@ -1,4 +1,4 @@
-import argparse, importlib.util, io, contextlib, os, tempfile, atexit, shutil
+import argparse, importlib.util, io, contextlib, os, tempfile, atexit, shutil, time
 from pathlib import Path
 GP200_PATH = str(Path(__file__).resolve().parent.parent / "gp200.py")
 spec = importlib.util.spec_from_file_location("gp200", GP200_PATH)
@@ -66,7 +66,7 @@ class FakeDevBase:
 #     never increments settle, never touches file I/O (Path.read_bytes is
 #     bypassed by monkeypatching Path so the fake .prst name is accepted).
 class FakeDevAlwaysClean(FakeDevBase):
-    def verify_write_full(self, slot, fb, skel):
+    def verify_write_full(self, slot, fb, skel, ignore_dead_bytes=True):  # accepts, ignores -- these fakes already do a strict (unfiltered) comparison
         roundtrip = gp200.build_prst_from_dump(dump_clean, "x", skel)
         mismatches = gp200.diff_prst_content(fb, roundtrip)
         return (len(mismatches) == 0), mismatches, gp200.prst_file_name(roundtrip), roundtrip
@@ -96,7 +96,7 @@ check("always-clean device: reports 0 mismatches in the summary", "0 mismatch(es
 #     crosses a threshold -- streak should reset on the failure and the
 #     delay actually used should have been bumped by --step.
 class FakeDevThreshold(FakeDevBase):
-    def verify_write_full(self, slot, fb, skel):
+    def verify_write_full(self, slot, fb, skel, ignore_dead_bytes=True):  # accepts, ignores -- these fakes already do a strict (unfiltered) comparison
         settle = self.settle_values[-1]
         dump = dump_clean if settle >= 1.25 else dump_bad
         roundtrip = gp200.build_prst_from_dump(dump, "x", skel)
@@ -119,7 +119,7 @@ check("threshold device: eventually reports success in the summary",
 # --- Scenario 3: never recovers -> should hit --max-settle and exit(1)
 #     rather than loop forever or silently return.
 class FakeDevAlwaysBad(FakeDevBase):
-    def verify_write_full(self, slot, fb, skel):
+    def verify_write_full(self, slot, fb, skel, ignore_dead_bytes=True):  # accepts, ignores -- these fakes already do a strict (unfiltered) comparison
         roundtrip = gp200.build_prst_from_dump(dump_bad, "x", skel)
         mismatches = gp200.diff_prst_content(fb, roundtrip)
         return (len(mismatches) == 0), mismatches, gp200.prst_file_name(roundtrip), roundtrip
@@ -171,7 +171,7 @@ FAIL_ON_ATTEMPTS = {2, 5, 9}  # a few scattered failures, all at the same offset
 class FakeDevSameOffsetAlways(FakeDevBase):
     """Fails on a few specific attempts, always at the same offset, succeeds
     otherwise -- mimics an intermittent-but-localized real bug."""
-    def verify_write_full(self, slot, fb, skel):
+    def verify_write_full(self, slot, fb, skel, ignore_dead_bytes=True):  # accepts, ignores -- these fakes already do a strict (unfiltered) comparison
         if self.write_calls in FAIL_ON_ATTEMPTS:
             bad = bytearray(dump_clean)
             bad[REPEAT_OFFSET - gp200.CONTENT_FILE_START] ^= 0xFF
@@ -202,7 +202,7 @@ class FakeDevInterruptsThenBad(FakeDevBase):
         super().write_slot(slot, fb, currently_active, commit=commit, settle_s=settle_s)
         if self.write_calls == 3:
             raise KeyboardInterrupt()
-    def verify_write_full(self, slot, fb, skel):
+    def verify_write_full(self, slot, fb, skel, ignore_dead_bytes=True):  # accepts, ignores -- these fakes already do a strict (unfiltered) comparison
         bad = bytearray(dump_clean)
         bad[REPEAT_OFFSET - gp200.CONTENT_FILE_START] ^= 0xFF
         roundtrip = gp200.build_prst_from_dump(bytes(bad), "x", skel)
@@ -227,6 +227,54 @@ check("Ctrl-C: raises a clean SystemExit rather than propagating KeyboardInterru
 check("Ctrl-C: still prints a summary (with whatever was tallied) before exiting",
       "Stopped after" in out6.getvalue())
 check("Ctrl-C: device connection is still closed", dev6.closed)
+
+# --- Regression guard (2026-09-29): this diagnostic tool exists specifically
+#     to characterize write reliability -- Scenario 5 above models the real
+#     pattern of every mismatch landing on one offset, which is exactly what
+#     led to DEAD_BYTE_FILE_OFFSETS. It must call the REAL verify_write_full
+#     with ignore_dead_bytes=False, so a mismatch confined to 0x43/0x9F is
+#     still tallied as a real MISMATCH here, unlike the relaxed default an
+#     ordinary `upload` now gets. Uses the real Device.verify_write_full
+#     (not a hand-rolled fake), so this actually exercises the call site in
+#     cmd_calibrate_settle, not just a stand-in that happens to agree with it. ---
+class FakeDevRealVerifyDeadByte:
+    # orig_device, not gp200.Device -- by this point in the file gp200.Device
+    # has been repeatedly reassigned to a lambda by earlier scenarios.
+    verify_write_full = orig_device.verify_write_full
+    read_dump_confirmed = orig_device.read_dump_confirmed
+    _dbg = orig_device._dbg
+
+    def __init__(self):
+        self.debug = False
+        self._t0 = time.monotonic()
+        self.closed = False
+        bad = bytearray(dump_clean)
+        bad[0x43 - gp200.CONTENT_FILE_START] ^= 0xFF
+        bad[0x9F - gp200.CONTENT_FILE_START] ^= 0xFF
+        self.dump = bytes(bad)  # differs from file_bytes ONLY at the dead-byte offsets
+
+    def write_slot(self, slot, fb, currently_active, commit=False, settle_s=1.0):
+        pass
+
+    def read_dump(self, slot):
+        return self.dump  # same every time -> read_dump_confirmed confirms on read 2
+
+    def close(self):
+        self.closed = True
+
+
+dev_dead_cs = FakeDevRealVerifyDeadByte()
+gp200.Device = lambda *a, **kw: dev_dead_cs
+out_dead_cs = io.StringIO()
+try:
+    with contextlib.redirect_stdout(out_dead_cs):
+        gp200.cmd_calibrate_settle(make_args(max_attempts=3, target_streak=5))
+except SystemExit:
+    pass
+check("calibrate-settle: a mismatch confined to DEAD_BYTE_FILE_OFFSETS is still "
+      "tallied as a MISMATCH here, not silently treated as OK -- proves "
+      "ignore_dead_bytes=False is actually reaching the real verify_write_full",
+      "MISMATCH" in out_dead_cs.getvalue())
 
 gp200.Device = orig_device
 gp200.Path.read_bytes = orig_read_bytes

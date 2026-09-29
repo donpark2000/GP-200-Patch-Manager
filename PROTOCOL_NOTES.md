@@ -1965,3 +1965,74 @@ independently, so it doesn't fully rule out some other value at these
 offsets behaving differently, or a coincidence specific to this slot.
 Holding off on a verification-behavior change pending that decision;
 documenting the finding here regardless.
+
+## Decision made: verification is about choosing what to check, not just retrying (2026-09-29)
+
+Direct feedback, deciding the open question above: *"I am leaning towards
+ignoring mismatches in fields that seem to have no impact on actual
+settings. This seems to imply verification is less about retries and
+more about choosing what to verify and what to ignore."* Confirmed and
+extended: retries and an ignore-list solve different problems, and this
+finding showed 0x43/0x9F had been miscategorized as needing the first
+when they actually needed the second. Retrying a WRITE can never fix a
+value the device won't store; retrying a READ still can, because unlike
+the tail block (genuinely live, changing device state) these two offsets'
+correct value never changes -- it's always 0x00. That distinction drove
+a three-part change, landed once the user could retest on both computers:
+
+1. **`DEAD_BYTE_FILE_OFFSETS = {0x43, 0x9F}`**, and an optional
+   `extra_ignore` parameter on `diff_prst_content`. `Device.verify_write_full`
+   passes it by default (`ignore_dead_bytes=True`), so `write_and_verify` /
+   `upload` / `apply-template` no longer report a false `WRITE FAILED TO
+   VERIFY` over these two bytes alone -- exactly what happened in the test
+   above.
+2. **`RAW_DUMP_IGNORE_OFFSETS` now also excludes these two offsets**, so
+   `read_dump_confirmed` no longer requires two reads to agree on them
+   either. Since `reread`'s whole investigation found EVERY read-to-read
+   disagreement landing on exactly these two offsets and nowhere else,
+   this should eliminate most of the retry stalls seen in real `export
+   --all` runs (the ones the progress dots made newly visible).
+3. **`normalize_export_dynamic_fields` now forces both offsets to `0x00`**
+   in every export, same treatment as the tail block and 0x2E -- keeps
+   exports deterministic now that a confirmed read is no longer guaranteed
+   to have converged on 0x00 itself.
+
+What deliberately did NOT change: `tries=7` and the graduated delays stay
+exactly as they are -- they're the safety net for whatever else the
+Windows driver bug could in principle corrupt (never observed outside
+these two offsets, but "never observed" isn't "can't happen"), and
+retrying still matters for a real content mismatch anywhere else in the
+dump. `reread` and soak-testing's `_confirm_discrepancy` still compare
+via `diff_prst_content`'s DEFAULT (unfiltered) behavior -- unaffected by
+either change, since `reread` never calls `read_dump_confirmed` at all,
+and default `diff_prst_content` was never touched. `cmd_calibrate_settle`
+and `cmd_soak` -- diagnostic tools whose whole purpose is to characterize
+write reliability, including the exact "every failure lands on one
+offset" pattern that led to this finding -- now explicitly call
+`verify_write_full(..., ignore_dead_bytes=False)`, so they keep full
+visibility rather than silently inheriting `upload`'s relaxed default.
+
+**A real bug caught along the way, before any of this shipped:**
+`DEAD_BYTE_FILE_OFFSETS` was first defined as `{0x43}` plus the *entire*
+`0x8C-0xA0` "pre-effects header" range `describe_prst_offset` already
+labeled (which includes 0x9F). That range also contains `0x90` -- one of
+the *other* slot-mirror bytes (0x34/0x90, see
+`EXPORT_ZEROED_SLOT_ECHO_OFFSET`), already correctly known to carry the
+real, non-zero target slot number, not a fixed value. Folding the whole
+range in would have made `normalize_export_dynamic_fields` zero out every
+export's slot-mirror byte -- a real, silent data-corruption bug.
+`test_export_normalization.py`'s existing slot-mirror check caught it
+immediately (regression tests, not manual review, caught this). Root
+cause: the wider range's "always 0x00" label was itself an
+overgeneralization that predates this session and had been harmless only
+because nothing previously acted on it -- `describe_prst_offset` is a
+label function, and 0x90 was already excluded from every real comparison
+for the correct, unrelated slot-mirror reason, so the mislabeling never
+surfaced. Fixed by narrowing `DEAD_BYTE_FILE_OFFSETS` to exactly `{0x43,
+0x9F}` -- the two offsets an actual write test touched -- rather than the
+wider labeled range; added a regression check asserting the constant
+stays exactly that set, plus that it never overlaps either real
+slot-mirror byte, so the same mistake can't silently reappear. The other
+18 bytes in the labeled range remain undisturbed and un-write-tested;
+`describe_prst_offset`'s comment for that range was corrected to stop
+implying otherwise.

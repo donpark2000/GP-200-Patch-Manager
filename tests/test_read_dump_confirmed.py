@@ -186,12 +186,22 @@ check("read_dump_confirmed: tries=1 (or less) is rejected as a usage error",
 #     (direct feedback: "a lot of extra output that should probably be
 #     suppressed unless -d is used"). Both sides of that are covered below:
 #     silent by default, and still fully available with debug=True. ---
+#
+# Uses an ordinary content offset (block 0 param 0), NOT 0x43/0x9F: those
+# are now in RAW_DUMP_IGNORE_OFFSETS (2026-09-29, see DEAD_BYTE_FILE_OFFSETS)
+# precisely so two reads differing ONLY there count as agreement -- using
+# either here would defeat the "still needs a diff-and-recover" setup this
+# section exists to test. That exemption gets its own dedicated coverage
+# further down, alongside the tail-block case it parallels.
 import struct
 skeleton = gp200.resolve_skeleton_bytes(None)
+REAL_DIFF_OFFSET = 0xA0 + 0x0C  # block 0 param 0
 real_a = bytearray(skeleton)[gp200.CONTENT_FILE_START:gp200.CHECKSUM_OFF]
 real_b = bytearray(real_a)
-real_b[0x9F - gp200.CONTENT_FILE_START] = 0xB7  # a real, previously-seen corrupted value
+real_b[REAL_DIFF_OFFSET - gp200.CONTENT_FILE_START] ^= 0xFF
 real_a, real_b = bytes(real_a), bytes(real_b)
+real_a_byte = real_a[REAL_DIFF_OFFSET - gp200.CONTENT_FILE_START]
+real_b_byte = real_b[REAL_DIFF_OFFSET - gp200.CONTENT_FILE_START]
 
 # Default (debug=False): a diff-and-recover must stay QUIET on the console --
 # this is the actual behavior change being tested, not just a side effect.
@@ -217,10 +227,10 @@ check("read_dump_confirmed: still returns the right value when it needs a diff-a
       result7 == real_a)
 check("read_dump_confirmed: prints something when reads disagree AND --debug is on",
       len(text7.strip()) > 0)
-check("read_dump_confirmed: the diagnostic names the actual byte offset that differed (0x9F)",
-      "0x009F" in text7)
-check("read_dump_confirmed: the diagnostic shows the actual differing values (0x00 vs 0xB7)",
-      "0x00" in text7 and "0xB7" in text7)
+check("read_dump_confirmed: the diagnostic names the actual field that differed (block 0 param 0)",
+      f"0x{REAL_DIFF_OFFSET:04X}" in text7 and "block 0 param 0" in text7)
+check("read_dump_confirmed: the diagnostic shows the actual differing values",
+      f"0x{real_a_byte:02X}" in text7 and f"0x{real_b_byte:02X}" in text7)
 
 # --- length-mismatch case: _describe_raw_dump_diff should say so plainly
 #     rather than crashing on a zip() length mismatch or silently ignoring it ---
@@ -260,7 +270,7 @@ check("read_dump_confirmed: confirms successfully when only the tail block diffe
 # And the converse: if something OUTSIDE the tail block also differs, that
 # must still be caught -- the fix must not become "ignore everything".
 tail_b_and_real_diff = bytearray(tail_b)
-tail_b_and_real_diff[0x9F - gp200.CONTENT_FILE_START] = 0xB7
+tail_b_and_real_diff[REAL_DIFF_OFFSET - gp200.CONTENT_FILE_START] ^= 0xFF
 dev_tail_and_real = FakeDevSequence([bytes(tail_a), bytes(tail_b_and_real_diff)])
 raised_tail = None
 try:
@@ -269,6 +279,46 @@ except gp200.ReadNotConfirmedError:
     raised_tail = True
 check("raw_dumps_agree: still correctly detects a REAL difference alongside tail-block noise",
       raised_tail is True)
+
+# ---------------------------------------------------------------------------
+# THE NEW FIX (2026-09-29): DEAD_BYTE_FILE_OFFSETS (file offset 0x43 and the
+# 0x8C-0xA0 range, which includes 0x9F) is now ALSO folded into
+# RAW_DUMP_IGNORE_OFFSETS, alongside the tail block above -- a real write
+# test showed the device enforces 0x00 there regardless of what's sent, and
+# normalize_export_dynamic_fields now forces the correct value at export
+# time regardless of which read happened to confirm, so requiring two reads
+# to agree here bought nothing but extra retries. Same two-sided proof as
+# the tail-block case: agreement despite noise confined to these offsets,
+# and a real difference elsewhere still isn't masked by it.
+# ---------------------------------------------------------------------------
+dead_a = bytearray(real_a)
+dead_b = bytearray(real_a)
+dead_b[0x43 - gp200.CONTENT_FILE_START] ^= 0xFF
+dead_b[0x9F - gp200.CONTENT_FILE_START] ^= 0xFF
+
+check("raw_dumps_agree: two dumps differing ONLY at the dead-byte offsets (0x43/0x9F) "
+      "still agree (2026-09-29 fix)",
+      gp200.raw_dumps_agree(bytes(dead_a), bytes(dead_b)))
+
+dev_dead = FakeDevSequence([bytes(dead_a), bytes(dead_b)])
+out_dead = io.StringIO()
+with contextlib.redirect_stdout(out_dead):
+    result_dead = gp200.Device.read_dump_confirmed(dev_dead, 5, tries=2)
+check("read_dump_confirmed: confirms successfully when only 0x43/0x9F differ -- this is "
+      "the exact real-world scenario (`reread` found EVERY prior disagreement landing "
+      "here) that used to force needless retries",
+      result_dead is not None and dev_dead.calls == 2)
+
+dead_b_and_real_diff = bytearray(dead_b)
+dead_b_and_real_diff[REAL_DIFF_OFFSET - gp200.CONTENT_FILE_START] ^= 0xFF
+dev_dead_and_real = FakeDevSequence([bytes(dead_a), bytes(dead_b_and_real_diff)])
+raised_dead = None
+try:
+    gp200.Device.read_dump_confirmed(dev_dead_and_real, 5, tries=2)
+except gp200.ReadNotConfirmedError:
+    raised_dead = True
+check("raw_dumps_agree: still correctly detects a REAL difference alongside dead-byte noise",
+      raised_dead is True)
 
 print()
 if failures:

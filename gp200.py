@@ -872,13 +872,32 @@ VERIFY_IGNORE_OFFSETS = frozenset(
     [0x2E, 0x34, 0x90]
 ) | TAIL_BLOCK_FILE_OFFSETS
 
-# File offset 0x43, and the 0x8C-0xA0 "pre-effects header" range (which
-# includes 0x9F) -- the two positions where EVERY read-to-read disagreement
-# found across the whole `reread` investigation landed (2026-09-27/29, see
-# PROTOCOL_NOTES.md). A real write test (2026-09-29) settled what these
-# actually are: uploading a file with deliberate garbage at both offsets
-# produced WRITE FAILED TO VERIFY with the identical 0x00 readback on all
-# 10 retry attempts -- ruled out our own write/verify code first
+# File offsets 0x43 and 0x9F -- the two positions where EVERY read-to-read
+# disagreement found across the whole `reread` investigation landed
+# (2026-09-27/29, see PROTOCOL_NOTES.md), and the exact two offsets a real
+# write test (2026-09-29) deliberately corrupted.
+#
+# Deliberately scoped to just these two, NOT the wider 0x8C-0xA0 range
+# describe_prst_offset's "pre-effects header" label covers (which includes
+# 0x9F): that range also includes 0x90, one of the two OTHER slot-mirror
+# bytes (0x34/0x90) already known, correctly, to carry the real slot
+# number rather than a fixed value (see EXPORT_ZEROED_SLOT_ECHO_OFFSET).
+# Folding the whole range in here initially masked that conflict --
+# test_export_normalization.py's slot-mirror checks caught normalize
+# zeroing 0x90, which would have silently corrupted every export's slot-
+# mirror byte. describe_prst_offset's own "every byte in here is always
+# 0x00" claim for the full range was therefore already imprecise for at
+# least 0x90 (harmlessly so before this change, since VERIFY_IGNORE_OFFSETS
+# already excluded 0x90 from any comparison for the correct, different
+# reason). The write test only ever actually touched 0x43 and 0x9F, so
+# that's what this exemption is scoped to -- not a blanket claim about the
+# other 18 bytes in that labeled range, which haven't been individually
+# write-tested.
+#
+# A real write test (2026-09-29) settled what these actually are:
+# uploading a file with deliberate garbage at both offsets produced WRITE
+# FAILED TO VERIFY with the identical 0x00 readback on all 10 retry
+# attempts -- ruled out our own write/verify code first
 # (build_upload_image passes both offsets through untouched; neither was in
 # VERIFY_IGNORE_OFFSETS at the time, so the mismatch was real, not
 # suppressed). A side-by-side Valeton Desktop comparison of the two patches,
@@ -891,37 +910,64 @@ VERIFY_IGNORE_OFFSETS = frozenset(
 # since the "correct" value the device will ever actually store is always
 # 0x00 regardless of what gets sent.
 #
-# Deliberately NOT folded into VERIFY_IGNORE_OFFSETS itself, and NOT fed
-# into RAW_DUMP_IGNORE_OFFSETS below, unlike that set:
-#   - RAW_DUMP_IGNORE_OFFSETS gates read_dump_confirmed's retry loop, whose
-#     job is to keep re-reading until it lands on the slot's actual,
-#     correct content. Unlike the tail block (whose true value genuinely
-#     changes between reads -- it's live device state), this offset's true
-#     value does NOT change -- it's always meant to be 0x00 -- so requiring
-#     read agreement here is still a meaningful, achievable check, and
-#     retrying a READ still buys something: a clean, honest export instead
-#     of one carrying a transient read-glitch value.
-#   - diff_prst_content's OTHER callers (`reread`, and soak-testing's
-#     _confirm_discrepancy) exist specifically to DETECT and characterize
-#     disagreement at exactly this offset -- that's how this was found in
-#     the first place. Silently exempting it there would blind those
-#     diagnostics to the very thing they're for, in exchange for nothing:
-#     they don't gate pass/fail on anything, they just report. So this is
-#     passed as diff_prst_content's optional `extra_ignore`, used only by
-#     verify_write_full's write/no-write judgment call, where retrying
-#     can't accomplish anything (see above) and treating it as a failure
-#     was never actionable.
-DEAD_BYTE_FILE_OFFSETS = frozenset([0x43] + list(range(0x8C, 0xA0)))
+# Deliberately NOT folded into VERIFY_IGNORE_OFFSETS itself, which is
+# reserved for fields the device recomputes to some device-CHOSEN value
+# (this one is always the same fixed 0x00, a different kind of exemption).
+# It's used in two places, each added at a different point in the
+# investigation:
+#
+#   1. diff_prst_content's optional `extra_ignore`, used only by
+#      verify_write_full's write/no-write judgment call (2026-09-29): a
+#      mismatch here can never be fixed by retrying the write (the device
+#      won't store anything else), so it was never an actionable failure.
+#
+#   2. RAW_DUMP_IGNORE_OFFSETS below, i.e. read_dump_confirmed's own
+#      agreement check too (2026-09-29, direct feedback approving this once
+#      (1) above was in place and tested: "OK... I'll retest on both
+#      computers"). Initially left OUT of this on the reasoning that a read
+#      retry still bought something a write retry couldn't (converging on
+#      the correct, fixed value) -- but that only matters if something
+#      downstream still cares what value ends up here, and nothing does:
+#      verify_write_full now ignores it via (1), and normalize_export_
+#      dynamic_fields (below) forces it to the correct 0x00 in every
+#      export regardless of which value a read happened to settle on. With
+#      both of those in place, requiring two reads to agree here bought
+#      nothing but extra retries -- almost certainly the majority of the
+#      stalls seen in real `export --all` runs, since `reread` (2026-09-27)
+#      found EVERY read-to-read disagreement in its whole investigation
+#      landing on exactly these offsets and nowhere else.
+#
+# What this does NOT touch: `reread` and soak-testing's
+# _confirm_discrepancy both compare via diff_prst_content's DEFAULT
+# (unfiltered) behavior, a completely separate code path from
+# read_dump_confirmed/raw_dumps_agree -- `reread` deliberately uses the
+# raw read_dump, never read_dump_confirmed, specifically so nothing papers
+# over what it's trying to show (see its own docstring). Both changes
+# above leave that fully intact: `reread` will keep reporting a glitch
+# here exactly as before, which is correct -- it's still real, still
+# happening, just no longer something export/upload need to chase.
+DEAD_BYTE_FILE_OFFSETS = frozenset([0x43, 0x9F])
 
 
 def normalize_export_dynamic_fields(file_bytes: bytes) -> bytes:
     """Zero the tail block (TAIL_BLOCK_FILE_OFFSETS), the 0x2E slot-echo byte
-    (EXPORT_ZEROED_SLOT_ECHO_OFFSET), and the further positions GP200
-    Studio's own export also blanks (STUDIO_ADDITIONAL_ZEROED_OFFSETS) in an
-    exported .prst, then recompute the checksum. Export-only -- NOT used for
-    write verification's internal comparisons or its saved failure
-    diagnostics, which still want the device's real, unmodified reported
-    value.
+    (EXPORT_ZEROED_SLOT_ECHO_OFFSET), the further positions GP200 Studio's
+    own export also blanks (STUDIO_ADDITIONAL_ZEROED_OFFSETS), and the known
+    dead-byte offsets (DEAD_BYTE_FILE_OFFSETS) in an exported .prst, then
+    recompute the checksum. Export-only -- NOT used for write verification's
+    internal comparisons or its saved failure diagnostics, which still want
+    the device's real, unmodified reported value.
+
+    DEAD_BYTE_FILE_OFFSETS: now that read_dump_confirmed no longer requires
+    two reads to agree here (2026-09-29 -- see that constant's own
+    docstring), a confirmed read could in principle settle on whichever
+    read happened first, glitch or not, if this function didn't step in.
+    Forcing it to the one value the device will ever actually store (0x00)
+    keeps exports deterministic -- the same patch, read twice, still
+    produces the same file -- without relying on a read retry to get there.
+    This is export-only, same as the other three: `reread` and
+    verify_write_full's saved failure diagnostics never call this function,
+    so neither loses visibility into what a raw read actually returned.
 
     Tail block: device-owned scratch state, not patch content -- it changes
     on every save AND on every plain read (see the constant's own
@@ -960,24 +1006,32 @@ def normalize_export_dynamic_fields(file_bytes: bytes) -> bytes:
     out[EXPORT_ZEROED_SLOT_ECHO_OFFSET] = 0x00
     for off in STUDIO_ADDITIONAL_ZEROED_OFFSETS:
         out[off] = 0x00
+    for off in DEAD_BYTE_FILE_OFFSETS:
+        out[off] = 0x00
     struct.pack_into(">H", out, CHECKSUM_OFF, prst_checksum(out))
     return bytes(out)
 
-# The same ignore set, translated from .prst FILE offsets to offsets within
-# a RAW device dump (as Device.read_dump returns it, before
-# build_prst_from_dump overlays it onto a skeleton at CONTENT_FILE_START).
-# Needed because read_dump_confirmed compares raw dumps directly, without
-# ever building a full .prst file -- and a real hardware test (2026-09-27)
-# proved it needs this filtering just as much as diff_prst_content does: the
-# tail block turns out to change on every plain READ, not just every SAVE as
-# previously documented, so comparing it unfiltered made two reads of a
-# completely untouched slot look unconfirmable forever (100% of the time),
-# not just occasionally -- read_dump_confirmed was comparing raw bytes for
-# exact equality with no filtering at all, the one comparison in this
-# codebase that had never needed VERIFY_IGNORE_OFFSETS before, because it's
-# brand new this session; every earlier verification path went through
-# diff_prst_content, which already excluded this.
-RAW_DUMP_IGNORE_OFFSETS = frozenset(off - CONTENT_FILE_START for off in VERIFY_IGNORE_OFFSETS)
+# VERIFY_IGNORE_OFFSETS, translated from .prst FILE offsets to offsets
+# within a RAW device dump (as Device.read_dump returns it, before
+# build_prst_from_dump overlays it onto a skeleton at CONTENT_FILE_START),
+# PLUS DEAD_BYTE_FILE_OFFSETS (added 2026-09-29 -- see that constant's own
+# docstring for why read confirmation no longer needs to require agreement
+# there either, now that verify_write_full and normalize_export_dynamic_
+# fields both handle it independently). Needed because read_dump_confirmed
+# compares raw dumps directly, without ever building a full .prst file --
+# and a real hardware test (2026-09-27) proved it needs this filtering just
+# as much as diff_prst_content does: the tail block turns out to change on
+# every plain READ, not just every SAVE as previously documented, so
+# comparing it unfiltered made two reads of a completely untouched slot
+# look unconfirmable forever (100% of the time), not just occasionally --
+# read_dump_confirmed was comparing raw bytes for exact equality with no
+# filtering at all, the one comparison in this codebase that had never
+# needed VERIFY_IGNORE_OFFSETS before, because it's brand new this session;
+# every earlier verification path went through diff_prst_content, which
+# already excluded this.
+RAW_DUMP_IGNORE_OFFSETS = frozenset(
+    off - CONTENT_FILE_START for off in (VERIFY_IGNORE_OFFSETS | DEAD_BYTE_FILE_OFFSETS)
+)
 
 
 def raw_dumps_agree(a: bytes, b: bytes) -> bool:
@@ -1015,15 +1069,28 @@ def describe_prst_offset(offset: int) -> str:
     if 0x64 <= offset < 0x8C:
         return "note"
     if 0x8C <= offset < 0xA0:
-        # 20 bytes between the note field and the first effect block whose
-        # purpose isn't otherwise mapped this session. Every real .prst
-        # sampled so far (official Valeton exports and our own round-trip
-        # exports alike) has 0x00 at every byte in here, including the exact
-        # byte (0x9F) that a real calibrate-settle run caught intermittently
-        # coming back non-zero across several different settle delays -- so
-        # treat a mismatch in this range as a real, reproducible finding, not
-        # a benign device-owned field like the ones in VERIFY_IGNORE_OFFSETS.
-        return f"pre-effects header byte {offset - 0x8C} (0x8C-0x9F, always 0x00 in every real sample seen so far)"
+        # 20 bytes between the note field and the first effect block. NOTE
+        # (2026-09-29): despite the label below, this range is NOT uniformly
+        # "always 0x00" -- it contains 0x90, one of the OTHER slot-mirror
+        # bytes (0x34/0x90, see EXPORT_ZEROED_SLOT_ECHO_OFFSET), which
+        # legitimately carries the real, non-zero target slot number and is
+        # excluded from comparison via VERIFY_IGNORE_OFFSETS for that
+        # reason -- this function's label for it is stale/inaccurate, but
+        # harmless in practice, because a caller never reaches this branch
+        # for 0x90 (it's filtered out upstream before a label is ever
+        # requested). Only two bytes in this range have an actual,
+        # confirmed-by-write-test explanation: 0x43 and 0x9F specifically
+        # (DEAD_BYTE_FILE_OFFSETS) -- the device enforces 0x00 there
+        # regardless of what's sent, so those two are excluded from
+        # write-verification failures and export determinism the same way
+        # VERIFY_IGNORE_OFFSETS's device-owned fields are. The other 18
+        # bytes in this range haven't been individually write-tested; this
+        # label is descriptive only, not a claim they're all equivalent to
+        # 0x43/0x9F. `reread` and soak-testing's discrepancy checks
+        # deliberately keep reporting a raw read-to-read disagreement
+        # anywhere in this range regardless (it's real transport noise;
+        # 0x43/0x9F just aren't something a write can fail on any more).
+        return f"pre-effects header byte {offset - 0x8C} (0x8C-0x9F)"
     EFFECT_BLOCK_START = 0xA0
     EFFECT_BLOCK_SIZE = 0x48
     if EFFECT_BLOCK_START <= offset < EFFECT_BLOCK_START + 11 * EFFECT_BLOCK_SIZE:
@@ -1543,18 +1610,32 @@ class Device:
             return False, "(no response)"
         return actual.strip() == expected_name.strip(), actual
 
-    def verify_write_full(self, slot: int, file_bytes: bytes, skeleton_bytes):
+    def verify_write_full(self, slot: int, file_bytes: bytes, skeleton_bytes,
+                          ignore_dead_bytes: bool = True):
         """Full-content verification: reads the whole slot back and compares
         every field the upload actually controls against the source file,
-        ignoring what's device-owned (VERIFY_IGNORE_OFFSETS) and the known
-        dead bytes the device won't store anything but 0x00 in regardless
-        of what's sent (DEAD_BYTE_FILE_OFFSETS -- see its docstring; a real
-        write test, 2026-09-29, showed retrying can't fix a mismatch there,
-        so treating one as a write failure was never actionable). This
-        exists because the write protocol itself has no per-chunk ACK/NAK --
-        neither this script nor either reference project has found one --
-        so a dropped or garbled byte in the chunk burst has nothing to catch
-        it except checking the result afterward.
+        ignoring what's device-owned (VERIFY_IGNORE_OFFSETS) and, when
+        `ignore_dead_bytes` is true (the default), the known dead bytes the
+        device won't store anything but 0x00 in regardless of what's sent
+        (DEAD_BYTE_FILE_OFFSETS -- see its docstring; a real write test,
+        2026-09-29, showed retrying can't fix a mismatch there, so treating
+        one as a write failure was never actionable for an ordinary upload).
+        This exists because the write protocol itself has no per-chunk
+        ACK/NAK -- neither this script nor either reference project has
+        found one -- so a dropped or garbled byte in the chunk burst has
+        nothing to catch it except checking the result afterward.
+
+        `ignore_dead_bytes=False` is for the diagnostic/calibration tools
+        (cmd_calibrate_settle, cmd_soak) that exist specifically to
+        characterize write reliability, including patterns at exactly this
+        offset -- that's how DEAD_BYTE_FILE_OFFSETS was found in the first
+        place (both tools' mismatch tallies are what surfaced "every
+        failure lands on the same offset" as a real, reproducible pattern).
+        Silently exempting it there in the name of the same fix would blind
+        the very tools built to catch this, in exchange for nothing: they
+        don't gate pass/fail for a user's own upload, they just report.
+        write_and_verify (the path `upload`/`apply-template` actually use)
+        keeps the default.
 
         Uses read_dump_confirmed rather than a single read_dump: a real test
         (the `reread` command, 2026-09-27) proved that a bare read can
@@ -1577,7 +1658,8 @@ class Device:
         except TimeoutError:
             return False, None, "(no response)", None
         roundtrip = build_prst_from_dump(dump, "verify", skeleton_bytes, debug=self.debug)
-        mismatches = diff_prst_content(file_bytes, roundtrip, extra_ignore=DEAD_BYTE_FILE_OFFSETS)
+        extra_ignore = DEAD_BYTE_FILE_OFFSETS if ignore_dead_bytes else frozenset()
+        mismatches = diff_prst_content(file_bytes, roundtrip, extra_ignore=extra_ignore)
         return (len(mismatches) == 0), mismatches, prst_file_name(roundtrip), roundtrip
 
 # ---------------------------------------------------------------- zip ------
@@ -2384,7 +2466,12 @@ def cmd_calibrate_settle(args):
                              f"{settle:.2f}s). The settle-time theory alone may not fully explain "
                              "the retries.")
                 dev.write_slot(slot, file_bytes, None, commit=args.commit, settle_s=settle)
-                ok, mismatches, actual, roundtrip = dev.verify_write_full(slot, file_bytes, skeleton)
+                # ignore_dead_bytes=False: this tool exists to characterize
+                # write reliability, including a pattern confined to
+                # DEAD_BYTE_FILE_OFFSETS -- that's how it was found (see
+                # verify_write_full's docstring). Don't relax it here.
+                ok, mismatches, actual, roundtrip = dev.verify_write_full(
+                    slot, file_bytes, skeleton, ignore_dead_bytes=False)
                 if ok:
                     streak += 1
                     print(f"  [{total_attempts:3d}] settle={settle:.2f}s  OK    "
@@ -2687,7 +2774,11 @@ def cmd_soak(args):
         for i in range(1, args.count + 1):
             cycles_run = i
             dev.write_slot(slot, file_bytes, None, commit=args.commit, settle_s=args.settle)
-            ok, mismatches, actual, roundtrip = dev.verify_write_full(slot, file_bytes, skeleton)
+            # ignore_dead_bytes=False: same reasoning as cmd_calibrate_settle
+            # above -- this is a diagnostic tool, not a user-facing
+            # pass/fail, and should keep full visibility.
+            ok, mismatches, actual, roundtrip = dev.verify_write_full(
+                slot, file_bytes, skeleton, ignore_dead_bytes=False)
             if ok:
                 print(f"  [{i:3d}/{args.count}] OK")
             else:

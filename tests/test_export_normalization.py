@@ -28,6 +28,12 @@ dump[0x34] = 0x90
 dump[0x90] = 0x90
 # and a real, non-ignored content byte that should survive untouched
 dump[0x44] = ord('X')
+# the dead-byte offsets, deliberately non-zero here too, to actually
+# exercise normalize_export_dynamic_fields zeroing them (the skeleton
+# already has 0x00 at both, which would make that check pass trivially
+# without this)
+dump[0x43] = 0xB7
+dump[0x9F] = 0xB6
 dump = bytes(dump)[gp200.CONTENT_FILE_START:gp200.CHECKSUM_OFF]
 
 built = gp200.build_prst_from_dump(dump, "x", skeleton)
@@ -53,8 +59,29 @@ check("STUDIO_ADDITIONAL_ZEROED_OFFSETS: doesn't overlap TAIL_BLOCK_FILE_OFFSETS
 check("normalize_export_dynamic_fields: the OTHER slot-mirror bytes (0x34, 0x90) "
       "are deliberately left alone -- real Valeton exports don't zero these",
       normalized[0x34] == 0x90 and normalized[0x90] == 0x90)
+
+# Regression guard (2026-09-29): DEAD_BYTE_FILE_OFFSETS was initially defined
+# as 0x43 plus the WHOLE 0x8C-0xA0 "pre-effects header" range, which silently
+# overlaps 0x90 -- one of the two slot-mirror bytes just asserted above,
+# already known to carry the real slot number, not a fixed value. Zeroing it
+# here would have corrupted every export's slot-mirror byte. Caught by the
+# check right above this one failing; narrowed DEAD_BYTE_FILE_OFFSETS to
+# exactly {0x43, 0x9F} (the only two offsets an actual write test touched).
+# This asserts the constant itself stays narrow, so the same mistake can't
+# silently come back if someone "helpfully" widens it again later.
+check("DEAD_BYTE_FILE_OFFSETS is exactly {0x43, 0x9F} -- NOT the wider "
+      "0x8C-0xA0 range, which would reintroduce the 0x90 slot-mirror conflict",
+      gp200.DEAD_BYTE_FILE_OFFSETS == frozenset([0x43, 0x9F]))
+check("DEAD_BYTE_FILE_OFFSETS doesn't overlap either real slot-mirror byte "
+      "(0x34, 0x90)",
+      not (gp200.DEAD_BYTE_FILE_OFFSETS & {0x34, 0x90}))
 check("normalize_export_dynamic_fields: real content elsewhere is untouched",
       normalized[0x44] == ord('X'))
+check("normalize_export_dynamic_fields: DEAD_BYTE_FILE_OFFSETS (0x43, 0x9F) are "
+      "forced to 0x00, regardless of whatever the device dump happened to have "
+      "there -- keeps exports deterministic now that read_dump_confirmed no "
+      "longer requires reads to agree on these",
+      normalized[0x43] == 0x00 and normalized[0x9F] == 0x00)
 check("normalize_export_dynamic_fields: file length is unchanged",
       len(normalized) == len(built))
 check("normalize_export_dynamic_fields: checksum is recomputed to match the zeroed content",
@@ -81,25 +108,30 @@ check("normalize_export_dynamic_fields: two reads differing only in tail-block n
       "produce byte-IDENTICAL exports",
       normalized == normalized2)
 
-# verify_write_full / diff_prst_content must NOT be affected by the
-# TAIL_BLOCK_FILE_OFFSETS/0x2E zeroing -- those are already excluded via
-# VERIFY_IGNORE_OFFSETS, so write verification keeps comparing the device's
-# real, unmodified reported bytes there regardless of what export does.
-# STUDIO_ADDITIONAL_ZEROED_OFFSETS is deliberately NOT added to
+# verify_write_full / diff_prst_content's DEFAULT behavior must NOT be
+# affected by the TAIL_BLOCK_FILE_OFFSETS/0x2E zeroing -- those are already
+# excluded via VERIFY_IGNORE_OFFSETS, so write verification keeps comparing
+# the device's real, unmodified reported bytes there regardless of what
+# export does. STUDIO_ADDITIONAL_ZEROED_OFFSETS is deliberately NOT added to
 # VERIFY_IGNORE_OFFSETS (same reasoning as EXPORT_ZEROED_SLOT_ECHO_OFFSET:
 # this was found by comparing FILES, not by testing the write path, so it
 # says nothing about what a correct write should echo back) -- so those
-# positions SHOULD show up as mismatches here, proving the write-verification
-# path is untouched by this export-only change.
+# positions SHOULD show up as mismatches here. DEAD_BYTE_FILE_OFFSETS
+# SHOULD too, by the same logic as reread/soak-testing (see that constant's
+# docstring): diff_prst_content's DEFAULT view stays fully sensitive to a
+# difference there, it's only verify_write_full's `extra_ignore` that
+# relaxes it. All three together prove the write-verification/diagnostic
+# path is untouched by this export-only function.
 mismatches = gp200.diff_prst_content(built, normalized)
 mismatch_offsets = {off for off, _, _ in mismatches}
 check("normalize_export_dynamic_fields's TAIL_BLOCK_FILE_OFFSETS/0x2E zeroing "
       "is invisible to diff_prst_content (already ignored there)",
       not (mismatch_offsets & (gp200.TAIL_BLOCK_FILE_OFFSETS | {gp200.EXPORT_ZEROED_SLOT_ECHO_OFFSET})))
-check("normalize_export_dynamic_fields's STUDIO_ADDITIONAL_ZEROED_OFFSETS zeroing "
-      "is NOT hidden from diff_prst_content -- write verification is deliberately "
+check("normalize_export_dynamic_fields's STUDIO_ADDITIONAL_ZEROED_OFFSETS and "
+      "DEAD_BYTE_FILE_OFFSETS zeroing is NOT hidden from diff_prst_content's "
+      "default view -- write-verification/diagnostic visibility is deliberately "
       "left untouched by this export-only finding",
-      mismatch_offsets == gp200.STUDIO_ADDITIONAL_ZEROED_OFFSETS)
+      mismatch_offsets == gp200.STUDIO_ADDITIONAL_ZEROED_OFFSETS | gp200.DEAD_BYTE_FILE_OFFSETS)
 
 print()
 if failures:
