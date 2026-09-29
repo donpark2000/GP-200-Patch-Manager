@@ -1092,6 +1092,30 @@ class Device:
                 return parse_preset_name(chunks[0])
         raise TimeoutError(f"no response reading name of slot {slot_to_label(slot)}")
 
+    def read_name_via_dump(self, slot: int, retries=RETRY_COUNT) -> str:
+        """Same result as read_name(), but by asking for the full dump (the
+        same request export/read_dump uses) instead of the name-only
+        (sub=0x20) request, and keeping only the name.
+
+        Real-hardware evidence (2026-09-29, see PROTOCOL_NOTES.md) showed
+        these two request types behave completely differently on this
+        firmware: across every slot in two full traces, the name-only
+        request's FIRST attempt timed out the full READ_TIMEOUT_S with zero
+        exceptions (succeeding only on the automatic retry, ~15ms later),
+        while the full-dump request succeeded on its first attempt in under
+        20ms with zero exceptions. `list` switched to this method because of
+        that -- not because of any doubt about read_name's correctness, but
+        because read_name reliably pays a ~READ_TIMEOUT_S tax read_dump
+        never does, for reasons still unconfirmed (see the "in progress"
+        note in PROTOCOL_NOTES.md).
+
+        Deliberately uses plain read_dump, not read_dump_confirmed: a wrong
+        name once in a rare while is cosmetic and just means re-reading that
+        one slot, nothing like the corruption risk read_dump_confirmed
+        exists to catch for real backups."""
+        decoded = self.read_dump(slot, retries=retries)
+        return extract_name_field(decoded)
+
     def read_dump(self, slot: int, retries=RETRY_COUNT) -> bytes:
         for attempt in range(retries + 1):
             self._flush_pending()
@@ -1444,7 +1468,11 @@ def cmd_list(args):
         timeouts = 0
         for slot in range(TOTAL_SLOTS):
             try:
-                name = dev.read_name(slot)
+                # read_name_via_dump, not read_name -- see its docstring for
+                # the real-hardware evidence (2026-09-29) that the name-only
+                # request this used to use pays a ~READ_TIMEOUT_S tax on
+                # every single slot that the full-dump request never does.
+                name = dev.read_name_via_dump(slot)
             except TimeoutError:
                 name = "(no response)"
                 timeouts += 1

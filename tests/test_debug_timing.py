@@ -113,10 +113,14 @@ orig_device = gp200.Device
 
 
 class FakeListDevice:
+    """cmd_list calls read_name_via_dump, not read_name, as of 2026-09-29
+    (see gp200.Device.read_name_via_dump's docstring for the real-hardware
+    evidence behind the switch) -- this fake only needs to implement
+    whichever one cmd_list actually calls."""
     def __init__(self):
         self.closed = False
 
-    def read_name(self, slot):
+    def read_name_via_dump(self, slot):
         if slot == 3:
             raise TimeoutError("no response")
         return f"Patch {slot}"
