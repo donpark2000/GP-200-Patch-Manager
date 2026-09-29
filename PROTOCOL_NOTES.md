@@ -1479,6 +1479,33 @@ skipped rather than raising, since this is informational and not
 something export's correctness depends on), and both the single-slot and
 batch `cmd_export` output paths, in both the dependent and clean cases.
 
+**Amended same day, before this had been tested on real hardware**, per
+two direct corrections:
+
+1. *"there are snaptone slots in both the amp module and the dist
+   module... our warning should clarify which."* The AMP-position and
+   DST-position code ranges both address the same 5 physical NAM-capture
+   slots, but a block using the AMP-position code and a block using the
+   DST-position code are two distinct, independently-loadable uses of that
+   capture (as the amp vs. as the drive/distortion) -- not the same thing
+   twice. The original description collapsed both into "SnapTone (NAM)
+   slot N" with no way to tell which position was meant.
+   `describe_ir_nam_dependency` now tags each one: `"SnapTone (NAM) slot N
+   (amp)"` or `"SnapTone (NAM) slot N (dist)"`.
+2. *"it is perfectly possible that one patch uses both as well as an IR.
+   So the warning should ensure all are mentioned."* This was already true
+   of `find_ir_nam_dependencies`' implementation (it scans all 11 blocks
+   and appends every match, not just the first), but it hadn't been
+   explicitly tested as a guarantee -- only single-dependency patches were
+   covered. Added a test scanning a patch with a User-IR reference AND a
+   SnapTone-as-amp reference AND a SnapTone-as-dist reference on the SAME
+   underlying slot number all at once, confirming all four (the three
+   plus a second SnapTone-dist on a different slot) come back distinctly
+   and in chain-block order -- run both at the unit level
+   (`find_ir_nam_dependencies` directly) and end-to-end through
+   `cmd_export`'s single-slot path, so the guarantee holds all the way to
+   what actually gets printed, not just in the scanning function.
+
 One internal-naming note for future readers of `gp200.py`: this feature's
 constants are named `DUMP_EFFECT_BLOCK_START`/`DUMP_EFFECT_BLOCK_SIZE`
 (decoded-dump-offset-based, 0x78), deliberately prefixed to avoid confusion

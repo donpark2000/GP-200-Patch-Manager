@@ -54,14 +54,22 @@ check("describe_ir_nam_dependency: User-IR slot 29 (range end, inclusive)",
       gp200.describe_ir_nam_dependency(0x0A10001D) == "User-IR slot 29")
 check("describe_ir_nam_dependency: one past the User-IR range is NOT a dependency",
       gp200.describe_ir_nam_dependency(0x0A10001E) is None)
-check("describe_ir_nam_dependency: SnapTone slot 0 from the AMP-position range",
-      gp200.describe_ir_nam_dependency(0x0F000000) == "SnapTone (NAM) slot 0")
-check("describe_ir_nam_dependency: SnapTone slot 4 (AMP-position range end)",
-      gp200.describe_ir_nam_dependency(0x0F000004) == "SnapTone (NAM) slot 4")
-check("describe_ir_nam_dependency: SnapTone slot 0 from the DST-position range",
-      gp200.describe_ir_nam_dependency(0x0F000005) == "SnapTone (NAM) slot 0")
-check("describe_ir_nam_dependency: SnapTone slot 4 (DST-position range end)",
-      gp200.describe_ir_nam_dependency(0x0F000009) == "SnapTone (NAM) slot 4")
+# The AMP-position and DST-position ranges address the same 5 physical
+# capture slots but are NOT interchangeable -- a patch can use a given
+# capture as its amp, its drive, or (in different blocks) both at once --
+# so the description must say which position, not just which slot
+# (2026-09-29, direct request: "our warning should clarify which").
+check("describe_ir_nam_dependency: SnapTone slot 0 from the AMP-position range is tagged '(amp)'",
+      gp200.describe_ir_nam_dependency(0x0F000000) == "SnapTone (NAM) slot 0 (amp)")
+check("describe_ir_nam_dependency: SnapTone slot 4 (AMP-position range end), still '(amp)'",
+      gp200.describe_ir_nam_dependency(0x0F000004) == "SnapTone (NAM) slot 4 (amp)")
+check("describe_ir_nam_dependency: SnapTone slot 0 from the DST-position range is tagged '(dist)'",
+      gp200.describe_ir_nam_dependency(0x0F000005) == "SnapTone (NAM) slot 0 (dist)")
+check("describe_ir_nam_dependency: SnapTone slot 4 (DST-position range end), still '(dist)'",
+      gp200.describe_ir_nam_dependency(0x0F000009) == "SnapTone (NAM) slot 4 (dist)")
+check("describe_ir_nam_dependency: same slot number, different position, are NOT equal "
+      "(the position tag must actually distinguish them, not just decorate)",
+      gp200.describe_ir_nam_dependency(0x0F000002) != gp200.describe_ir_nam_dependency(0x0F000007))
 check("describe_ir_nam_dependency: an ordinary built-in effect code is None",
       gp200.describe_ir_nam_dependency(0x00010002) is None)
 
@@ -85,10 +93,22 @@ clean_dump = make_decoded_with_effect_codes({})
 check("find_ir_nam_dependencies: an all-ordinary-effects patch reports nothing",
       gp200.find_ir_nam_dependencies(clean_dump) == [])
 
-mixed_dump = make_decoded_with_effect_codes({0: 0x0A100003, 5: 0x0F000001, 10: 0x0F000007})
+# Directly exercises the "perfectly possible" scenario raised 2026-09-29: a
+# single patch referencing a User-IR AND a SnapTone-as-amp AND a
+# SnapTone-as-dist all at once -- including the same underlying NAM slot
+# (1) used as BOTH the amp (block 3) and the dist (block 5) in one patch,
+# which must show up as two distinct, correctly-tagged entries, not one.
+mixed_dump = make_decoded_with_effect_codes({
+    0: 0x0A100003,   # User-IR slot 3
+    3: 0x0F000001,   # SnapTone slot 1, used as amp
+    5: 0x0F000006,   # SnapTone slot 1, used as dist -- SAME slot, other position
+    10: 0x0F000007,  # SnapTone slot 2, used as dist
+})
 found = gp200.find_ir_nam_dependencies(mixed_dump)
-check("find_ir_nam_dependencies: finds all three dependent blocks, in chain order",
-      found == ["User-IR slot 3", "SnapTone (NAM) slot 1", "SnapTone (NAM) slot 2"])
+check("find_ir_nam_dependencies: finds ALL FOUR dependent blocks, in chain order, "
+      "correctly distinguishing the same slot used as amp vs. dist",
+      found == ["User-IR slot 3", "SnapTone (NAM) slot 1 (amp)",
+                "SnapTone (NAM) slot 1 (dist)", "SnapTone (NAM) slot 2 (dist)"])
 
 check("find_ir_nam_dependencies: a too-short/malformed dump is skipped, not an error",
       gp200.find_ir_nam_dependencies(b"\x00" * 4) == [])
@@ -110,7 +130,28 @@ def dump_with_dependency(base_dump: bytes, block_index: int, code: int) -> bytes
     return bytes(buf)
 
 
-dump_dependent = dump_with_dependency(dump_clean_full, 2, 0x0A100005)
+def dump_with_dependencies(base_dump: bytes, overlays: dict) -> bytes:
+    """Like dump_with_dependency, but applies several block overlays at
+    once -- for testing a single patch that references more than one
+    User-IR/SnapTone slot simultaneously (a real, expected case per direct
+    request 2026-09-29, not an edge case being humored)."""
+    buf = bytearray(base_dump)
+    for block_index, code in overlays.items():
+        base = gp200.DUMP_EFFECT_BLOCK_START + block_index * gp200.DUMP_EFFECT_BLOCK_SIZE
+        struct.pack_into("<I", buf, base + gp200.DUMP_EFFECT_MODEL_OFFSET, code)
+    return bytes(buf)
+
+
+# A single patch depending on a User-IR AND a SnapTone-as-amp AND a
+# SnapTone-as-dist all at once -- exactly the scenario raised 2026-09-29
+# ("it is perfectly possible that one patch uses both as well as an IR"),
+# run end-to-end through the real single-slot export path this time, not
+# just the unit-level find_ir_nam_dependencies check above.
+dump_dependent = dump_with_dependencies(dump_clean_full, {
+    2: 0x0A100005,   # User-IR slot 5
+    4: 0x0F000001,   # SnapTone slot 1, used as amp
+    6: 0x0F000006,   # SnapTone slot 1, used as dist -- same slot, other position
+})
 
 orig_device = gp200.Device
 orig_resolve_skeleton = gp200.resolve_skeleton_bytes
@@ -147,6 +188,16 @@ with contextlib.redirect_stdout(buf):
 out = buf.getvalue()
 check("export (single slot): prints a NOTE when the patch depends on a User-IR/SnapTone slot",
       "NOTE" in out and "User-IR slot 5" in out)
+# Split on "NOTE:" (with the colon) -- the message itself mentions
+# "PROTOCOL_NOTES.md", which contains "NOTE" as a substring and would
+# otherwise make a bare split("NOTE") cut the tail off mid-sentence.
+note_line = out.split("NOTE:")[-1]
+check("export (single slot): the SAME NOTE also names the SnapTone-as-amp dependency "
+      "(a patch can depend on more than one slot at once -- all must be mentioned)",
+      "SnapTone (NAM) slot 1 (amp)" in note_line)
+check("export (single slot): and the SnapTone-as-dist dependency on the SAME slot number, "
+      "correctly distinguished from the amp one",
+      "SnapTone (NAM) slot 1 (dist)" in note_line)
 if out_path.exists():
     out_path.unlink()
 
@@ -195,8 +246,9 @@ check("export (batch): prints ONE end-of-run NOTE summarizing the dependent patc
 note_tail = out3.split("NOTE:")[-1]
 check("export (batch): the summary names the SPECIFIC affected slot (34A)",
       "34A" in note_tail)
-check("export (batch): the summary names what it depends on",
-      "SnapTone (NAM) slot 2" in note_tail)
+check("export (batch): the summary names what it depends on, including WHICH position "
+      "(amp vs. dist) the SnapTone slot is used in",
+      "SnapTone (NAM) slot 2 (amp)" in note_tail)
 check("export (batch): the summary does not fault the clean slots (34B/34C absent from it)",
       "34B" not in note_tail and "34C" not in note_tail)
 if out_path3.exists():

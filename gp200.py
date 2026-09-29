@@ -580,25 +580,42 @@ def describe_ir_nam_dependency(effect_id: int) -> str | None:
     """Human-readable note if `effect_id` (a decoded effect block's model
     code) means "whatever is loaded into User-IR/SnapTone slot N" rather
     than a specific built-in sound. Returns None for an ordinary built-in
-    effect code, which is the vast majority of them."""
+    effect code, which is the vast majority of them.
+
+    The SnapTone AMP-position and DST-position code ranges both address the
+    same 5 physical NAM-capture slots (see the module comment above), but
+    they are NOT interchangeable in a patch: a block using the AMP-position
+    code is using that capture as the amp, a block using the DST-position
+    code is using the SAME capture as the drive/distortion -- two distinct,
+    independently-loadable uses of the same slot. Collapsing both ranges
+    into one description would hide that distinction, so each is tagged
+    with which position it was found in (2026-09-29, per direct request:
+    "there are snaptone slots in both the amp module and the dist module...
+    our warning should clarify which")."""
     if USER_IR_BASE <= effect_id < USER_IR_BASE + USER_IR_COUNT:
         return f"User-IR slot {effect_id - USER_IR_BASE}"
     if SNAPTONE_AMP_BASE <= effect_id < SNAPTONE_AMP_BASE + SNAPTONE_COUNT:
-        return f"SnapTone (NAM) slot {effect_id - SNAPTONE_AMP_BASE}"
+        return f"SnapTone (NAM) slot {effect_id - SNAPTONE_AMP_BASE} (amp)"
     if SNAPTONE_DST_BASE <= effect_id < SNAPTONE_DST_BASE + SNAPTONE_COUNT:
-        return f"SnapTone (NAM) slot {effect_id - SNAPTONE_DST_BASE}"
+        return f"SnapTone (NAM) slot {effect_id - SNAPTONE_DST_BASE} (dist)"
     return None
 
 
 def find_ir_nam_dependencies(decoded: bytes) -> list[str]:
-    """Scan a decoded dump's 11 effect blocks for any User-IR/SnapTone
-    references (see describe_ir_nam_dependency). Returns a list of
-    descriptions in chain-block order, empty if the patch uses none --
-    which is the common case, so callers should treat an empty list as
-    "nothing to report" rather than an error. Defensive about a short or
-    malformed dump: a block that doesn't fully fit is silently skipped
-    rather than raising, since this is an informational note, not
-    something export/upload's correctness depends on."""
+    """Scan a decoded dump's ALL 11 effect blocks for any User-IR/SnapTone
+    references (see describe_ir_nam_dependency), not just the first one
+    found -- a single patch can perfectly well reference a User-IR AND both
+    a SnapTone-as-amp AND a SnapTone-as-dist at once (2026-09-29: confirmed
+    this needs to be an explicit guarantee, not just an accident of the
+    implementation, per direct request: "it is perfectly possible that one
+    patch uses both as well as an IR. So the warning should ensure all are
+    mentioned"). Returns a list of descriptions in chain-block order, empty
+    if the patch uses none -- which is the common case, so callers should
+    treat an empty list as "nothing to report" rather than an error.
+    Defensive about a short or malformed dump: a block that doesn't fully
+    fit is silently skipped rather than raising, since this is an
+    informational note, not something export/upload's correctness depends
+    on."""
     found = []
     for i in range(DUMP_EFFECT_BLOCK_COUNT):
         base = DUMP_EFFECT_BLOCK_START + i * DUMP_EFFECT_BLOCK_SIZE
