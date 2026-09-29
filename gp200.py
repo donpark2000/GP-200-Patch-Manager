@@ -872,6 +872,47 @@ VERIFY_IGNORE_OFFSETS = frozenset(
     [0x2E, 0x34, 0x90]
 ) | TAIL_BLOCK_FILE_OFFSETS
 
+# File offset 0x43, and the 0x8C-0xA0 "pre-effects header" range (which
+# includes 0x9F) -- the two positions where EVERY read-to-read disagreement
+# found across the whole `reread` investigation landed (2026-09-27/29, see
+# PROTOCOL_NOTES.md). A real write test (2026-09-29) settled what these
+# actually are: uploading a file with deliberate garbage at both offsets
+# produced WRITE FAILED TO VERIFY with the identical 0x00 readback on all
+# 10 retry attempts -- ruled out our own write/verify code first
+# (build_upload_image passes both offsets through untouched; neither was in
+# VERIFY_IGNORE_OFFSETS at the time, so the mismatch was real, not
+# suppressed). A side-by-side Valeton Desktop comparison of the two patches,
+# module by module, found no visible difference. Together: the device
+# itself won't store anything but 0x00 here, and nothing in the editor
+# exposes whatever this is anyway -- a dead/reserved field, not patch
+# content. Direct feedback (2026-09-29): "As long as we export patches that
+# will upload and re-create the same settings, that is really all that
+# matters" -- by that standard a mismatch here isn't a real write failure,
+# since the "correct" value the device will ever actually store is always
+# 0x00 regardless of what gets sent.
+#
+# Deliberately NOT folded into VERIFY_IGNORE_OFFSETS itself, and NOT fed
+# into RAW_DUMP_IGNORE_OFFSETS below, unlike that set:
+#   - RAW_DUMP_IGNORE_OFFSETS gates read_dump_confirmed's retry loop, whose
+#     job is to keep re-reading until it lands on the slot's actual,
+#     correct content. Unlike the tail block (whose true value genuinely
+#     changes between reads -- it's live device state), this offset's true
+#     value does NOT change -- it's always meant to be 0x00 -- so requiring
+#     read agreement here is still a meaningful, achievable check, and
+#     retrying a READ still buys something: a clean, honest export instead
+#     of one carrying a transient read-glitch value.
+#   - diff_prst_content's OTHER callers (`reread`, and soak-testing's
+#     _confirm_discrepancy) exist specifically to DETECT and characterize
+#     disagreement at exactly this offset -- that's how this was found in
+#     the first place. Silently exempting it there would blind those
+#     diagnostics to the very thing they're for, in exchange for nothing:
+#     they don't gate pass/fail on anything, they just report. So this is
+#     passed as diff_prst_content's optional `extra_ignore`, used only by
+#     verify_write_full's write/no-write judgment call, where retrying
+#     can't accomplish anything (see above) and treating it as a failure
+#     was never actionable.
+DEAD_BYTE_FILE_OFFSETS = frozenset([0x43] + list(range(0x8C, 0xA0)))
+
 
 def normalize_export_dynamic_fields(file_bytes: bytes) -> bytes:
     """Zero the tail block (TAIL_BLOCK_FILE_OFFSETS), the 0x2E slot-echo byte
@@ -948,14 +989,20 @@ def raw_dumps_agree(a: bytes, b: bytes) -> bool:
     return all(x == y for i, (x, y) in enumerate(zip(a, b)) if i not in RAW_DUMP_IGNORE_OFFSETS)
 
 
-def diff_prst_content(expected: bytes, actual: bytes):
+def diff_prst_content(expected: bytes, actual: bytes, extra_ignore=frozenset()):
     """Compare two .prst-shaped buffers over the range a device dump actually
-    covers, skipping VERIFY_IGNORE_OFFSETS. Returns a list of
-    (offset, expected_byte, actual_byte) for anything else that differs --
-    empty means the write reproduced everything it's supposed to."""
+    covers, skipping VERIFY_IGNORE_OFFSETS (plus `extra_ignore`, for a
+    caller that wants to relax the comparison further -- see
+    DEAD_BYTE_FILE_OFFSETS's docstring for why that's an opt-in parameter
+    here rather than folded into VERIFY_IGNORE_OFFSETS itself: every caller
+    except verify_write_full wants full visibility, including into
+    DEAD_BYTE_FILE_OFFSETS). Returns a list of (offset, expected_byte,
+    actual_byte) for anything else that differs -- empty means the write
+    reproduced everything it's supposed to."""
     end = min(len(expected), len(actual), CHECKSUM_OFF)
+    ignore = VERIFY_IGNORE_OFFSETS | extra_ignore
     return [(i, expected[i], actual[i]) for i in range(CONTENT_FILE_START, end)
-            if i not in VERIFY_IGNORE_OFFSETS and expected[i] != actual[i]]
+            if i not in ignore and expected[i] != actual[i]]
 
 
 def describe_prst_offset(offset: int) -> str:
@@ -1499,7 +1546,11 @@ class Device:
     def verify_write_full(self, slot: int, file_bytes: bytes, skeleton_bytes):
         """Full-content verification: reads the whole slot back and compares
         every field the upload actually controls against the source file,
-        ignoring only what's device-owned (see VERIFY_IGNORE_OFFSETS). This
+        ignoring what's device-owned (VERIFY_IGNORE_OFFSETS) and the known
+        dead bytes the device won't store anything but 0x00 in regardless
+        of what's sent (DEAD_BYTE_FILE_OFFSETS -- see its docstring; a real
+        write test, 2026-09-29, showed retrying can't fix a mismatch there,
+        so treating one as a write failure was never actionable). This
         exists because the write protocol itself has no per-chunk ACK/NAK --
         neither this script nor either reference project has found one --
         so a dropped or garbled byte in the chunk burst has nothing to catch
@@ -1526,7 +1577,7 @@ class Device:
         except TimeoutError:
             return False, None, "(no response)", None
         roundtrip = build_prst_from_dump(dump, "verify", skeleton_bytes, debug=self.debug)
-        mismatches = diff_prst_content(file_bytes, roundtrip)
+        mismatches = diff_prst_content(file_bytes, roundtrip, extra_ignore=DEAD_BYTE_FILE_OFFSETS)
         return (len(mismatches) == 0), mismatches, prst_file_name(roundtrip), roundtrip
 
 # ---------------------------------------------------------------- zip ------
