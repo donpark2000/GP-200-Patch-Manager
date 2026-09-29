@@ -2036,3 +2036,14 @@ slot-mirror byte, so the same mistake can't silently reappear. The other
 18 bytes in the labeled range remain undisturbed and un-write-tested;
 `describe_prst_offset`'s comment for that range was corrected to stop
 implying otherwise.
+
+**Confirmed on real hardware, both computers (2026-09-29).** `reread`
+still shows the expected raw noise at 0x9F (unaffected, by design --
+confirms it's still fully sensitive, not silently blinded by any of the
+above). `export --all` on both machines: fast, zero errors, no visible
+stalls -- the retries the progress dots used to show were indeed almost
+entirely noise at these two offsets. (The write-side half of this fix --
+re-uploading a patch and confirming a clean first-attempt verify -- was
+suggested as a follow-up test but not yet explicitly confirmed.) Direct
+feedback: "Learning what to ignore was an important step." Closing out
+this investigation thread here.
