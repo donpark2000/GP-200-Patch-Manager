@@ -1890,3 +1890,78 @@ the newline before the summary, no dot-noise mixed into `--debug`
 output, and the new skip-message wording (replacing the now-stale check
 for `describe_read_failure`'s phrase, which no longer appears by
 default).
+
+## The write-side test: 0x43/0x9F look device-enforced-to-zero, not host noise (2026-09-29)
+
+Follow-up to the "harmless dead byte?" question raised above. Two test
+`.prst` files were built -- one untouched skeleton patch, one identical
+copy except file offsets 0x43 and 0x9F changed to 0xB7/0xB6 (an actually-
+observed garbage pairing from a real glitched read, not an arbitrary
+value) -- to test whether corruption at the one place reads keep
+disagreeing about has any visible effect.
+
+The user ran the corrupted file through this tool's own `upload` command
+against a real device slot rather than the originally-planned Valeton
+Desktop side-by-side load. Result: `WRITE FAILED TO VERIFY` after
+exhausting all `MAX_WRITE_ATTEMPTS` (10) retries, with the *identical*
+2-byte mismatch on every single attempt -- both offsets read back as
+exactly `0x00`, never anything else, never matching the 0xB7/0xB6 that
+was actually sent. Everything else in the patch, including the name
+field, verified and was confirmed written correctly.
+
+Before drawing any conclusion, checked whether this tool's own write
+path was responsible rather than the device: `build_upload_image` slices
+the outgoing content straight from `file_bytes[0x2E : len-FOOTER_LEN]`
+with no special-casing of 0x43 or the 0x8C-0xA0 range -- the only bytes
+it forces to a fixed value are the two already-known slot-mirror bytes
+(file offsets 0x34/0x90, image indices 20/112, forced to `0xFF`). So
+whatever was in the source file at 0x43/0x9F is exactly what went out in
+the chunk burst. On the verify side, neither offset is in
+`VERIFY_IGNORE_OFFSETS` (which only covers 0x28-0x2D, 0x2E, 0x34, 0x90,
+and the tail block), so `diff_prst_content` was comparing them for real,
+not silently dropping a real match. Confirmed: this is not a bug in our
+own write or verify code.
+
+That rules out our code, but also makes the result more interesting, not
+less. This is qualitatively different from every read-side observation
+so far: `verify_write_full` uses `read_dump_confirmed`, which only
+returns once two independent reads exactly agree -- so each of the 10
+attempts already represents at least two agreeing reads, all 10 of which
+agreed with each other too, all landing on exactly `0x00`. Read noise
+(the `reread` investigation above) never behaved this consistently --
+it disagreed from read to read, with values clustering around
+0x35-0x38/0xB5-0xB8, not pinned to one value. Ten-for-ten identical
+`0x00`, across independently-confirmed reads, looks like the device
+itself storing/returning `0x00` at these two positions regardless of
+what's written, not a transport artifact.
+
+The user then also did the originally-planned comparison anyway --
+loading both the baseline and the corrupted patch into Valeton Desktop
+and checking every module's settings by hand -- and found **no visible
+difference** between them.
+
+Put together, three independent lines of evidence now agree on the same
+conclusion for file offsets 0x43 and 0x8C-0xA0 (which includes 0x9F):
+they don't correspond to anything the Valeton Desktop editor exposes,
+the device won't even store a non-zero value there when directly asked
+to, and `describe_prst_offset` already noted 0x8C-0xA0 reads as `0x00`
+in every real sample seen. This also reframes the read-side noise: since
+the device's actual persisted value is reliably `0x00`, the garbage that
+occasionally shows up on a plain read is very likely a pure read-path
+artifact (consistent with the Windows USB-MIDI driver/buffer theory
+above) that would never survive an actual write -- a backup file that
+happened to capture 0xB7 there during a glitched read isn't recording
+real device state, and re-uploading it wouldn't reproduce that value on
+the device either, per this test.
+
+**Not yet decided:** whether to add 0x43 and 0x8C-0xA0 to
+`VERIFY_IGNORE_OFFSETS`. Upside: a source file carrying stale garbage at
+these offsets (e.g. from an earlier glitched export) currently makes
+`upload`/`apply-template` burn all 10 retry attempts and report a false
+`WRITE FAILED TO VERIFY` even though nothing meaningful is actually
+wrong -- exactly what happened in this test. Downside: this is one test,
+on one slot, with both offsets changed together rather than
+independently, so it doesn't fully rule out some other value at these
+offsets behaving differently, or a coincidence specific to this slot.
+Holding off on a verification-behavior change pending that decision;
+documenting the finding here regardless.
