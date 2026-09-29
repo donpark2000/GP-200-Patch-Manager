@@ -188,9 +188,11 @@ with contextlib.redirect_stdout(buf):
 out = buf.getvalue()
 check("export (single slot): prints a NOTE when the patch depends on a User-IR/SnapTone slot",
       "NOTE" in out and "User-IR slot 5" in out)
-# Split on "NOTE:" (with the colon) -- the message itself mentions
-# "PROTOCOL_NOTES.md", which contains "NOTE" as a substring and would
-# otherwise make a bare split("NOTE") cut the tail off mid-sentence.
+# Split on "NOTE:" (with the colon) rather than a bare "NOTE" -- defensive:
+# nothing in the current message contains "NOTE" as a substring elsewhere,
+# but it did briefly (a "PROTOCOL_NOTES.md" pointer, dropped 2026-09-29 per
+# direct feedback that a guitar player has no reason to open that file --
+# see the message-content check further down), and the colon costs nothing.
 note_line = out.split("NOTE:")[-1]
 check("export (single slot): the SAME NOTE also names the SnapTone-as-amp dependency "
       "(a patch can depend on more than one slot at once -- all must be mentioned)",
@@ -198,6 +200,12 @@ check("export (single slot): the SAME NOTE also names the SnapTone-as-amp depend
 check("export (single slot): and the SnapTone-as-dist dependency on the SAME slot number, "
       "correctly distinguished from the amp one",
       "SnapTone (NAM) slot 1 (dist)" in note_line)
+check("export (single slot): the NOTE does NOT point at PROTOCOL_NOTES.md -- that file is "
+      "for anyone writing software against the GP-200, not something a guitar player would "
+      "ever want or need to open (2026-09-29 feedback)",
+      "PROTOCOL_NOTES" not in out)
+check("export (single slot): the NOTE still points a user somewhere useful -- the README",
+      "README" in note_line)
 if out_path.exists():
     out_path.unlink()
 
@@ -239,16 +247,19 @@ check("export (batch): the zip still gets all 3 entries (a dependency isn't a sk
       out_path3.exists() and len(zipfile.ZipFile(out_path3).namelist()) == 3)
 check("export (batch): prints ONE end-of-run NOTE summarizing the dependent patch(es)",
       "NOTE:" in out3 and "1 patch(es)" in out3)
-# Split on "NOTE:" (with the colon), not bare "NOTE" -- the summary itself
-# points to "PROTOCOL_NOTES.md", which contains "NOTE" as a substring and
-# would otherwise make split("NOTE") cut the tail off mid-sentence, before
-# the very slot/dependency text these checks are looking for.
+# Split on "NOTE:" (with the colon), defensively -- see the matching comment
+# in the single-slot section above.
 note_tail = out3.split("NOTE:")[-1]
 check("export (batch): the summary names the SPECIFIC affected slot (34A)",
       "34A" in note_tail)
 check("export (batch): the summary names what it depends on, including WHICH position "
       "(amp vs. dist) the SnapTone slot is used in",
       "SnapTone (NAM) slot 2 (amp)" in note_tail)
+check("export (batch): the summary does NOT point at PROTOCOL_NOTES.md (2026-09-29 "
+      "feedback: not a document a guitar player would ever want or need to open)",
+      "PROTOCOL_NOTES" not in out3)
+check("export (batch): the summary still points a user somewhere useful -- the README",
+      "README" in note_tail)
 check("export (batch): the summary does not fault the clean slots (34B/34C absent from it)",
       "34B" not in note_tail and "34C" not in note_tail)
 if out_path3.exists():

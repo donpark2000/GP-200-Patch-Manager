@@ -1571,3 +1571,59 @@ and a new `test_export_quiet_output.py` covers both mechanisms together,
 end-to-end through `cmd_export` itself, matching the shape of the real bug
 report rather than trusting that the two pieces being individually correct
 guarantees the combination is.
+
+## Round 2 of export console noise (same day, next real test)
+
+The IR/NAM dependency warning worked correctly on its first real test --
+a patch built to reference a User-IR and both SnapTone positions at once
+was reported with all three, correctly labeled. But the same run surfaced
+three more things left in `export`'s output that only make sense to
+someone reading this file, not to the guitar player actually running the
+command:
+
+1. *"I don't see much value in spitting out the name of every patch. The
+   summary at the end should be enough."* The per-slot progress line
+   (`"{label}: {name!r} ({bytes} bytes)"`) -- printed on both the
+   single-slot and batch export paths -- moved behind `--debug` entirely.
+   Nothing meaningful was lost: the single-slot path's final `"Wrote
+   {out_path}"` line already names the patch (it's baked into the output
+   filename), and the batch path already has its own end-of-run summary
+   (`"Wrote N patches to X (N slots read in Ys)"`).
+2. *"the message for a skipped one about 5 consecutive reads not matching
+   is a debug thing - meaningless to a guitar player."* A skipped or
+   failed slot used to show the raw `ReadNotConfirmedError` text verbatim
+   -- `"5 read(s) of 34B never agreed with each other -- couldn't get a
+   trustworthy read"` -- which names an internal retry count (the
+   `tries` default) that reads as a bug report, not a status update. New
+   `describe_read_failure(e)` gives a plain-language reason instead:
+   `"couldn't get a reliable read (the device's answers didn't agree)"`
+   for a `ReadNotConfirmedError`, `"no response from the device"` for a
+   plain timeout -- keeping that one real distinction (dead silence vs. a
+   noisy connection) without the retry-count detail. The raw exception
+   text is still appended in parentheses when `--debug` is on.
+3. *"the reference to the PROTOCOL NOTES file can be dropped. I do not see
+   that as a document a user would ever want or need to refer to - that is
+   more for the benefit of anyone trying to write software."* Fair --
+   this file is exactly that: reverse-engineering notes toward a future
+   protocol document, not user-facing help. The IR/NAM dependency NOTE (in
+   both export paths) dropped its `"See PROTOCOL_NOTES.md (Finding 11)"`
+   half and now only points at the README's "Known limitations" section,
+   which IS written for a user.
+
+None of these needed protocol changes, only output wording -- but several
+existing tests exercise the REAL `Device.read_dump_confirmed` or
+`Device.verify_write_full` against hand-written fakes (see the "console-
+noise sources" entry above for why those needed a `.debug` attribute in
+the first place), and one (`test_export_confirmed.py`) asserted on the
+literal old wording ("never agreed" with no `--debug`), which needed
+updating to match the new plain-language default. New/updated coverage:
+`test_export_quiet_output.py` gained checks that the per-slot line is
+gone by default and back with `--debug`, plus a new never-agrees scenario
+proving the friendly message by default and the raw detail with
+`--debug`; `test_ir_nam_dependency_warning.py` gained explicit checks
+that neither export path's NOTE mentions `PROTOCOL_NOTES` and that both
+still point at the README.
+
+**Still outstanding, not yet addressed**: the user mentioned this most
+recent real run had "a few failures" and is sending the console log
+separately -- not yet reviewed as of this writeup.

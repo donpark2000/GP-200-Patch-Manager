@@ -11,14 +11,36 @@ of extra output that should probably be suppressed unless -d is used."
 Both sources moved behind --debug (gp200.py: build_prst_from_dump gained a
 `debug` parameter that every caller now threads through; read_dump_confirmed's
 two print() calls became self._dbg() calls, which are gated on self.debug).
-Unit-level coverage for each piece separately lives in test_gp200.py
-(build_prst_from_dump) and test_read_dump_confirmed.py (read_dump_confirmed).
 
-This file covers the thing the bug report was actually about: running
-`export` end-to-end, through both mechanisms at once, and checking the
-console output a real user would actually see -- quiet without -d, and
-still fully informative with it -- rather than trusting that the two
-pieces being individually correct guarantees the combination is."""
+**Round 2 (same day, next real test run):** even with those two gone, there
+was still more than a guitar player needs. Three more pieces of direct
+feedback, all addressed here:
+  - "I don't see much value in spitting out the name of every patch. The
+    summary at the end should be enough." -> the per-slot `"{label}: {name!r}
+    ({bytes} bytes)"` progress line (both export's single-slot and batch
+    paths) is now ALSO --debug-only. The single-slot path's final "Wrote
+    {out_path}" line already names the patch (it's baked into the filename),
+    and the batch path already has its own end-of-run summary -- neither
+    needs the noisier line repeated at every step.
+  - "the message for a skipped one about 5 consecutive reads not matching
+    is a debug thing - meaningless to a guitar player" -> a skipped/failed
+    slot's message no longer embeds the raw ReadNotConfirmedError text
+    ("N read(s) of X never agreed with each other..."), which names an
+    internal retry count. describe_read_failure() gives a plain-language
+    reason instead ("couldn't get a reliable read" / "no response from the
+    device"); the raw detail is still appended when --debug is on.
+  - "the reference to the PROTOCOL NOTES file can be dropped ... that is
+    more for the benefit of anyone trying to write software" -> covered in
+    test_ir_nam_dependency_warning.py (the NOTE message this applies to is
+    that feature's), not duplicated here.
+
+Unit-level coverage for the two Round 1 mechanisms separately lives in
+test_gp200.py (build_prst_from_dump) and test_read_dump_confirmed.py
+(read_dump_confirmed). This file covers the thing both bug reports were
+actually about: running `export` end-to-end and checking the console output
+a real user would actually see -- quiet without -d, and still fully
+informative with it -- rather than trusting that each piece being
+individually correct guarantees the combination is."""
 import argparse, contextlib, importlib.util, io, time
 from pathlib import Path
 
@@ -87,10 +109,10 @@ class FakeDevMixedSlots:
         self.closed = True
 
 
-# --- default (no --debug): must be QUIET about the routine stuff, but NOT
-#     silent overall -- the normal per-slot progress line and the final
-#     summary line are still exactly what a user relies on to see the
-#     export actually happened. ---
+# --- default (no --debug): must be QUIET about ALL the routine stuff --
+#     including, as of round 2, the per-slot progress line itself -- but NOT
+#     silent overall: the final summary line is still exactly what a user
+#     relies on to see the export actually happened. ---
 gp200.Device = lambda *a, **kw: FakeDevMixedSlots(debug=kw.get("debug", False))
 out_path = Path("quiet.zip")
 if out_path.exists():
@@ -105,17 +127,20 @@ check("export (no -d): the overlay accounting line is gone",
 check("export (no -d): read_dump_confirmed's retry-diagnostic lines are gone, "
       "even though slot 1-B genuinely needed a retry to confirm",
       "read_dump_confirmed(" not in out)
-check("export (no -d): the ordinary per-slot progress line is STILL there "
-      "(this is a noise fix, not a silence-everything regression)",
-      "1A:" in out and "1B:" in out)
-check("export (no -d): the final 'Wrote N patches...' summary is STILL there",
+check("export (no -d): the per-slot progress line (name + byte count) is ALSO gone now "
+      "(round 2, 2026-09-29: \"I don't see much value in spitting out the name of every "
+      "patch. The summary at the end should be enough.\")",
+      "1A:" not in out and "1B:" not in out)
+check("export (no -d): the final 'Wrote N patches...' summary is STILL there -- this is "
+      "a noise fix, not a silence-everything regression",
       "Wrote 2 patches" in out)
 if out_path.exists():
     out_path.unlink()
 
 
-# --- --debug: the exact same run, same fake, same glitch -- both kinds of
-#     diagnostic detail must still be fully available when asked for. ---
+# --- --debug: the exact same run, same fake, same glitch -- ALL diagnostic
+#     detail (overlay accounting, retry diagnostics, AND the per-slot
+#     progress line) must still be fully available when asked for. ---
 gp200.Device = lambda *a, **kw: FakeDevMixedSlots(debug=kw.get("debug", False))
 out_path2 = Path("verbose.zip")
 if out_path2.exists():
@@ -130,6 +155,76 @@ check("export (-d): the overlay accounting line is back",
 check("export (-d): read_dump_confirmed's retry-diagnostic line for the genuinely "
       "glitchy slot (1-B) is back",
       "read_dump_confirmed(1B)" in out2)
+check("export (-d): the per-slot progress line is back too",
+      "1A:" in out2 and "1B:" in out2)
+if out_path2.exists():
+    out_path2.unlink()
+
+
+# --- a slot that never confirms at all (not just a glitch-then-recover):
+#     the skip message must use plain language by default, not the raw
+#     "N read(s) of X never agreed with each other" exception text -- and
+#     still offer that raw detail when --debug is on. ---
+def _dump_with_marker(value: int) -> bytes:
+    buf = bytearray(dump_clean)
+    buf[0x9F - gp200.CONTENT_FILE_START] = value  # same real-world offset as elsewhere in this suite
+    return bytes(buf)
+
+
+# 5 mutually-distinct dumps -- read_dump_confirmed's default tries=5 will
+# exhaust its whole budget without any two ever agreeing with each other.
+NEVER_AGREE_SEQUENCE = [_dump_with_marker(v) for v in (0x11, 0x22, 0x33, 0x44, 0x55)]
+
+
+class FakeDevNeverAgrees:
+    # orig_device (saved before any test above reassigned gp200.Device to a
+    # lambda), not gp200.Device -- by this point in the file gp200.Device no
+    # longer refers to the real class.
+    read_dump_confirmed = orig_device.read_dump_confirmed
+    _dbg = orig_device._dbg
+
+    def __init__(self, debug=False):
+        self.debug = debug
+        self._t0 = time.monotonic()
+        self.closed = False
+        self.reads = list(NEVER_AGREE_SEQUENCE)
+
+    def read_dump(self, slot):
+        return self.reads.pop(0)
+
+    def close(self):
+        self.closed = True
+
+
+gp200.Device = lambda *a, **kw: FakeDevNeverAgrees(debug=kw.get("debug", False))
+out_path3 = Path("never_agrees.zip")
+if out_path3.exists():
+    out_path3.unlink()
+buf3 = io.StringIO()
+with contextlib.redirect_stdout(buf3):
+    gp200.cmd_export(make_args(start="1-A", end="1-A", out=str(out_path3), debug=False))
+out3 = buf3.getvalue()
+check("export (no -d): a slot that never confirms is reported in plain language",
+      "couldn't get a reliable read" in out3)
+check("export (no -d): ...NOT with the raw internal retry-count wording "
+      "(2026-09-29: \"meaningless to a guitar player\")",
+      "never agreed" not in out3)
+if out_path3.exists():
+    out_path3.unlink()
+
+gp200.Device = lambda *a, **kw: FakeDevNeverAgrees(debug=kw.get("debug", False))
+out_path4 = Path("never_agrees_debug.zip")
+if out_path4.exists():
+    out_path4.unlink()
+buf4 = io.StringIO()
+with contextlib.redirect_stdout(buf4):
+    gp200.cmd_export(make_args(start="1-A", end="1-A", out=str(out_path4), debug=True))
+out4 = buf4.getvalue()
+check("export (-d): the same failure STILL includes the raw retry-count detail "
+      "when --debug is on",
+      "never agreed" in out4)
+if out_path4.exists():
+    out_path4.unlink()
 if out_path2.exists():
     out_path2.unlink()
 

@@ -1057,6 +1057,24 @@ class ReadNotConfirmedError(TimeoutError):
     pass
 
 
+def describe_read_failure(e: Exception) -> str:
+    """A plain-language reason for a failed slot read, for output a
+    non-technical user will actually see (export's skip/failure messages).
+    The raw exception text -- e.g. "5 read(s) of 34B never agreed with each
+    other -- couldn't get a trustworthy read" -- names an internal retry
+    count that means nothing to a guitar player and reads as a bug report,
+    not a status update (2026-09-29: "the message for a skipped one about 5
+    consecutive reads not matching is a debug thing"). Still distinguishes
+    the two real cases (dead silence vs. a noisy/disagreeing connection),
+    since that distinction is genuinely useful ("check your cable" reads
+    differently from "try again"); the exact retry count stays available
+    via --debug, which already shows every individual disagreement as it
+    happens (see read_dump_confirmed)."""
+    if isinstance(e, ReadNotConfirmedError):
+        return "couldn't get a reliable read (the device's answers didn't agree)"
+    return "no response from the device"
+
+
 class Device:
     def __init__(self, port_substr: str | None, debug: bool = False):
         self.debug = debug
@@ -1686,7 +1704,15 @@ def cmd_export(args):
                 try:
                     decoded = dev.read_dump_confirmed(slot)
                     name = extract_name_field(decoded) or label
-                    print(f"{label}: {name!r} ({len(decoded)} bytes)")
+                    # Per-slot progress (name + byte count) used to print
+                    # unconditionally -- 256 lines nobody but a developer
+                    # cares about on a full export, when the end-of-run
+                    # summary already says how many patches got written.
+                    # Gated behind --debug 2026-09-29, per direct feedback:
+                    # "I don't see much value in spitting out the name of
+                    # every patch. The summary at the end should be enough."
+                    if args.debug:
+                        print(f"{label}: {name!r} ({len(decoded)} bytes)")
                     deps = find_ir_nam_dependencies(decoded)
                     if deps:
                         ir_nam_by_label[label] = deps
@@ -1694,7 +1720,8 @@ def cmd_export(args):
                         build_prst_from_dump(decoded, name, skeleton, debug=args.debug))
                     entries[f"{label}_{safe_filename(name)}.prst"] = data
                 except TimeoutError as e:
-                    print(f"{label}: skipped ({e})")
+                    detail = f" ({e})" if args.debug else ""
+                    print(f"{label}: skipped -- {describe_read_failure(e)}{detail}")
                     skipped_labels.append(label)
             elapsed = time.monotonic() - started
             write_zip(entries, out_path)
@@ -1720,12 +1747,16 @@ def cmd_export(args):
                       "EARLIER than where it actually came from. Re-run export to fill the "
                       "gap(s) before using this zip to restore.")
             # This backup only carries the model code that means "whatever's in
-            # User-IR/SnapTone slot N", never the IR/NAM content itself (see
-            # PROTOCOL_NOTES.md Finding 11) -- so restoring these patches later
-            # sounds right only on the same device, with nothing reloaded into
-            # those slots since. Flag it now, while it's still actionable,
-            # rather than as a "why does this patch sound different" surprise
-            # after a factory reset or a move to a new unit.
+            # User-IR/SnapTone slot N", never the IR/NAM content itself -- so
+            # restoring these patches later sounds right only on the same
+            # device, with nothing reloaded into those slots since. Flag it
+            # now, while it's still actionable, rather than as a "why does
+            # this patch sound different" surprise after a factory reset or a
+            # move to a new unit. (The PROTOCOL_NOTES.md pointer this used to
+            # carry was dropped 2026-09-29 -- that file is for anyone writing
+            # software against the GP-200, not something a guitar player
+            # would ever want or need to open; the README stays since it's
+            # written for a user.)
             if ir_nam_by_label:
                 total_refs = sum(len(v) for v in ir_nam_by_label.values())
                 print(f"NOTE: {len(ir_nam_by_label)} patch(es) reference {total_refs} "
@@ -1735,24 +1766,30 @@ def cmd_export(args):
                     print(f"  {label}: {', '.join(deps)}")
                 print("  Restoring these on a DIFFERENT device, or after that slot's IR/NAM "
                       "has been reloaded with something else, will sound different -- with no "
-                      "warning either way. See PROTOCOL_NOTES.md (Finding 11) / the README's "
-                      "'Known limitations' section.")
+                      "warning either way. See the README's 'Known limitations' section for "
+                      "details.")
         else:
             slot = label_to_slot(args.slot)
             try:
                 decoded = dev.read_dump_confirmed(slot)
             except TimeoutError as e:
-                sys.exit(f"Couldn't export {args.slot}: {e}")
+                detail = f" ({e})" if args.debug else ""
+                sys.exit(f"Couldn't export {args.slot}: {describe_read_failure(e)}{detail}")
             name = extract_name_field(decoded) or args.slot
-            print(f"{args.slot}: {name!r} ({len(decoded)} bytes)")
+            # See the matching comment in the batch path above: the "Wrote
+            # {out_path}" line below already names the patch (it's baked
+            # into the filename), so this extra name+bytes line is
+            # redundant noise for anyone but a developer -- --debug only,
+            # as of 2026-09-29.
+            if args.debug:
+                print(f"{args.slot}: {name!r} ({len(decoded)} bytes)")
             deps = find_ir_nam_dependencies(decoded)
             if deps:
                 print(f"NOTE: this patch references {', '.join(deps)} -- this backup only "
                       "stores WHICH slot, not the IR/NAM content itself. Restoring it on a "
                       "DIFFERENT device, or after that slot's IR/NAM has been reloaded with "
                       "something else, will sound different -- with no warning either way. "
-                      "See PROTOCOL_NOTES.md (Finding 11) / the README's 'Known limitations' "
-                      "section.")
+                      "See the README's 'Known limitations' section for details.")
             data = normalize_export_dynamic_fields(
                 build_prst_from_dump(decoded, name, skeleton, debug=args.debug))
             out_path = Path(args.out) if args.out else Path(f"{args.slot}_{safe_filename(name)}.prst")

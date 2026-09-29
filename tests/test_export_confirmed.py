@@ -105,12 +105,41 @@ except SystemExit as e:
     message = str(e)
 check("export: reads that never agree exit cleanly (SystemExit), not a raw crash",
       exited_cleanly)
-check("export: the exit message explains reads never agreed, not a generic/empty error",
-      "never agreed" in message)
+# 2026-09-29: the exit message uses a plain-language phrase now, not the raw
+# "N read(s) of X never agreed with each other" exception text -- that names
+# an internal retry count that means nothing to a guitar player ("the
+# message for a skipped one about 5 consecutive reads not matching is a
+# debug thing"). The raw detail is still available, just gated behind
+# --debug now (checked separately below), not baked into the default message.
+check("export: the exit message explains the read failed in plain language, "
+      "not a generic/empty error",
+      "couldn't get a reliable read" in message)
+check("export: the exit message does NOT expose the internal retry-count wording "
+      "by default (that's --debug detail now, not a user-facing message)",
+      "never agreed" not in message)
 check("export: nothing was written when reads never agreed",
       not out_path2.exists())
 check("export: still closed the device connection even on this failure path",
       dev_never_agrees.closed)
+
+# --debug: the same failure, but the raw retry-count detail should still be
+# fully available for anyone who asks for it.
+dev_never_agrees_dbg = FakeDevExport([dump_bad, dump_clean, dump_other])
+gp200.Device = lambda *a, **kw: dev_never_agrees_dbg
+out_path2b = Path("1A_test2b.prst")
+if out_path2b.exists():
+    out_path2b.unlink()
+message_dbg = ""
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        gp200.cmd_export(make_args(out=str(out_path2b), debug=True))
+except SystemExit as e:
+    message_dbg = str(e)
+check("export --debug: the exit message STILL includes the raw retry-count detail "
+      "when --debug is on",
+      "never agreed" in message_dbg)
+if out_path2b.exists():
+    out_path2b.unlink()
 
 # --- export --all: the overwrite prompt must happen BEFORE reading any
 #     slot, not after all 256 -- a real ~256-slot run (2026-09-27) showed the
