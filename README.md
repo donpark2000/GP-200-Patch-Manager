@@ -58,6 +58,27 @@ This is an actively evolving personal project, not a finished product --
 `PROTOCOL_NOTES.md` tracks what's confirmed, what's still open, and the
 evidence behind each finding.
 
+## Known limitations
+
+**Patches referencing a User-IR or NAM ("SnapTone") slot don't carry that
+content.** A patch only stores a small number saying *which* User-IR or
+SnapTone slot to use for a cab/amp/drive -- never the impulse response or
+NAM capture itself (see `PROTOCOL_NOTES.md`, Finding 11). Exporting and
+restoring such a patch on the *same* device, with nothing reloaded into
+that slot since, sounds exactly right. Moving it to a *different* device --
+or reloading that slot with something else on the same one -- makes the
+patch silently pick up whatever is there now, with no warning either way.
+Even manually re-loading the original IR/NAM file isn't enough by itself:
+it has to land back in the *same slot number* the patch references, or the
+patch breaks just the same as if the content were missing or swapped.
+
+This is a property of the `.prst` format itself, confirmed by reading
+GP200 Studio's own patch-export code: it has the identical exposure, and
+as far as we've found, no GP-200 tool (including Valeton's own editor)
+backs up or moves the actual IR/NAM slot content. If you're moving patches
+between devices, or seeing sound differences after a restore, this is
+almost certainly why.
+
 ## Usage
 
 The commands below are written as `gp200.py ...` (running from source with

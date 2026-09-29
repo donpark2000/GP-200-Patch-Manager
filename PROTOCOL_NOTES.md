@@ -1266,3 +1266,139 @@ Net effect for the planned public post: no patch data is ever at risk from
 this, on any firmware/language — the fix only makes the tool's own console
 output and generated filenames honest instead of silently wrong for a name
 it can't fully understand.
+
+## Finding 11: patches reference User-IR/NAM slots by index, not by content (2026-09-28)
+
+Prompted by a real question from a Facebook group member after the
+project's first public post: the GP-200 lets you load your own impulse
+response (IR) and NAM (Neural Amp Modeler) captures onto the device, then
+pick them like any other cab/amp/drive option when building a patch. Does
+`export`/`upload` carry that sound along with the patch, on the same device
+and across two different devices? Investigated by reading (not copying) the
+GPL-3.0 GP200 Studio source and the independently reverse-engineered
+RigSheet effect-name table, both already credited above as protocol
+sources — not by any new hardware capture.
+
+- **A patch stores a plain numeric selector for each effect slot, never the
+  underlying audio/model data.** Each of a patch's 11 effect blocks (72
+  bytes each, starting at file offset 0xA0) has a 4-byte little-endian
+  "model code" field at offset 8 within the block. GP200 Studio's own
+  decoder reads this field directly (`MODEL_OFFSET = 8`) and looks it up in
+  a fixed table of ~300 known codes to get a display name — there is no
+  separate field anywhere in the 1224-byte file for audio samples or
+  network weights, and the file size is constant regardless of what's
+  selected. This confirms the "pointer to a slot" model directly rather
+  than by inference from file size alone.
+- **User-loaded IRs are addressed the same way as any built-in cab.**
+  GP200 Studio's effect-code table has a dedicated run of codes
+  `0x0A100000`–`0x0A10001D` (30 entries) under its "CAB" module, every one
+  named generically "User IR" — i.e. codes that mean "whatever the user
+  loaded into User-IR slot N," not a specific sound. A comment in GP200
+  Studio's own connect sequence independently confirms the device exposes
+  "30 User-IR slot names" via its own SysEx query.
+- **NAM captures work the same way, under a different name.** GP200
+  Studio's table has no entries for these, but RigSheet's independently
+  reverse-engineered effect table does: codes `0x0F000000`–`0x0F000004` (5
+  slots) tagged module "AMP" and `0x0F000005`–`0x0F000009` (5 slots) tagged
+  module "DST", every one named "SnapTone" with the description "For
+  importing and using the .nam file." So a captured NAM profile is
+  addressed by the same kind of small numeric index, just in the amp and
+  distortion module slots instead of the cab slot, and RigSheet's slot
+  labels ("empty 1".."empty 4") show it treats them exactly like an
+  otherwise-unassigned slot until the user loads something into it.
+- **Neither reference project moves the actual IR/NAM content on
+  export, either.** GP200 Studio's own patch-export flow
+  (`ExportPresetDialog` → `PRSTEncoder`) only ever writes name, author and
+  target slot into the standard .prst layout — it does not read or bundle
+  whatever audio/model data a referenced User-IR/SnapTone slot currently
+  holds. GP200 Studio does separately query the 30 User-IR slot *names*
+  (a distinct SysEx exchange, `0x12`/`0x1C` "assignment query" messages,
+  not the `0x10`/`0x12`/`0x18` dump/read-name messages this project already
+  uses) purely so its own effect picker can show what's loaded — but that's
+  labels only, not the binary content, and no equivalent query for SnapTone
+  slot names or content was found anywhere in either reference project.
+
+**What this means for `export`/`upload` as they exist today:**
+
+- *Same slot content, same or different device:* a patch that references
+  User-IR slot 7 (say) will sound right after export+reimport as long as
+  slot 7 still holds the same IR on whichever device it's imported to —
+  because `export`/`upload` already move the whole effect-block region
+  byte-for-byte, unmodified, including that 4-byte selector. No fix needed
+  here; this was already correct, just previously unverified.
+- *Different content in that slot (most likely on a different device, but
+  also possible on the same device after the user swaps what's loaded into
+  a slot):* the patch will silently select whatever is now in slot 7
+  instead — a different sound, or nothing at all if that slot is empty. The
+  .prst format has no way to detect or flag this; it is a structural limit
+  of "select by index," not a bug specific to this tool. GP200 Studio's own
+  patch files have the identical exposure.
+- This is exactly the pattern already established for slot-position
+  metadata elsewhere in this file: the pointer is faithfully preserved,
+  but what it points to lives outside the patch and outside this tool's
+  knowledge.
+- **Manually restoring the IR/NAM files themselves isn't enough on its
+  own, either.** The selector is a slot *number*, not an identity or a
+  filename, so a patch that references User-IR slot 7 will only sound
+  right again if whatever gets (re)loaded ends up in slot 7 specifically --
+  reloading the exact same file into a different slot breaks the patch
+  exactly as much as a missing or swapped one would. (Confirmed by a real
+  Facebook-group report the same day this was written up, after this
+  project's author posted a PSA about the limitation above.)
+
+**Open, not yet investigated:** the actual binary format and SysEx
+transfer for User-IR/SnapTone slot *content* (as opposed to the numeric
+selector or the name) is undocumented in all three of this project's own
+notes, GP200 Studio, and RigSheet. Building real IR/NAM export/import
+would need new reverse-engineering (most likely USB capture of the
+official Valeton editor loading a .wav/.nam file), not just reading
+existing open-source references. A smaller, immediately buildable step
+that needs no new reverse-engineering: teach `export`/`list` to decode the
+model code in each effect block and print when a patch depends on a
+User-IR or SnapTone slot (and which index), using the code ranges
+confirmed above — surfacing the dependency even before this tool can move
+the referenced content itself.
+
+## In progress: why does `list` feel slower than `export --all`? (2026-09-29)
+
+Real-world observation, not yet explained: `list` (256 single-chunk
+name-only reads) is reported as noticeably slower in practice than
+`export --all` (256 confirmed *multi*-chunk full-dump reads, each needing
+2+ round trips to agree) -- backwards from what the amount of data/protocol
+work per slot would predict. Compared against GP200 Studio's own
+name-loading code (`loadPresetNames`), which uses the identical name-only
+request (`sub=0x20`/`0x18`) with a 250ms timeout and a comment noting the
+device "responds in ~20ms normally" -- there's no evidence either tool has
+some other, faster bulk-list message being missed; the mechanism is already
+the same one both projects use. So the likely difference is in per-request
+timing/timeout behavior, not the message shape, but that's a hypothesis,
+not yet a finding.
+
+**Instrumentation added to test this** (no protocol/behavior changes,
+verified by the existing regression suite plus a new
+`tests/test_debug_timing.py`):
+- Every `--debug` line is now prefixed with elapsed time since the device
+  connected (`Device._dbg`, timed from `Device._t0`) -- previously there
+  were no timestamps anywhere in the trace, so seeing *how long* a read
+  took meant eyeballing raw message dumps with no timing in them at all.
+- `_drain_matching` now reports the actual measured round-trip time on a
+  successful read (`received in X.XXXs`), and on a timeout, the real
+  elapsed time rather than just echoing back the configured timeout budget
+  (`timed out after X.XXXs of Y.Ys budget`).
+- `list` and `export`'s batch path (`--all`/`--start`/`--end`) each now
+  print an unconditional one-line total (slot count, elapsed seconds, and
+  for `list`, a timeout count) even without `--debug` -- cheap enough to
+  always show, and it directly answers "how long did this actually take"
+  without needing a full trace.
+
+**Next step**: run `list -d` and `export --all -d` back to back on real
+hardware and compare. If `list`'s reads are hitting the 2.0s
+`READ_TIMEOUT_S` budget on a meaningful fraction of slots while
+`export`'s full-dump reads mostly don't, that points at giving name-only
+reads their own much shorter timeout (matching GP200 Studio's 250ms,
+justified by the same "single self-contained chunk, no reassembly
+ambiguity" reasoning that already applies to `read_name` vs `read_dump`).
+If instead both commands show prompt replies per-slot, the slowness isn't
+timeout-related at all and needs a different explanation. Either way,
+nothing here is fixed yet -- this section exists so the eventual real
+numbers land next to the hypothesis they're testing, not lost in chat.
