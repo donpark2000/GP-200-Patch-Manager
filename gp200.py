@@ -954,6 +954,12 @@ class ReadNotConfirmedError(TimeoutError):
 class Device:
     def __init__(self, port_substr: str | None, debug: bool = False):
         self.debug = debug
+        # Session-relative clock for --debug timestamps (2026-09-29, added
+        # while chasing why `list` feels much slower than `export --all`
+        # despite export doing more work per slot -- see PROTOCOL_NOTES.md).
+        # Monotonic, not wall-clock: only elapsed time within this run matters,
+        # and monotonic is immune to system clock adjustments mid-run.
+        self._t0 = time.monotonic()
         ins = mido.get_input_names()
         outs = mido.get_output_names()
         in_name = self._match(ins, port_substr)
@@ -963,6 +969,14 @@ class Device:
         self.outport = mido.open_output(out_name)
         self._handshake()
 
+    def _dbg(self, msg: str):
+        """Print a --debug line prefixed with elapsed time since this Device
+        connected (see self._t0). Centralizing the timestamp format here,
+        rather than re-deriving it at each of the ~10 call sites below, is
+        what makes it practical to change later (2026-09-29)."""
+        if self.debug:
+            print(f"[+{time.monotonic() - self._t0:7.3f}s] {msg}")
+
     def _handshake(self):
         """Identity query + enter-editor-mode, matching what the reference
         editor always does right after opening the port. See
@@ -970,11 +984,10 @@ class Device:
         try:
             self.send(build_identity_query())
             got = self._drain_matching(0x12, 0x08, 1, READ_TIMEOUT_S)
-            if not got and self.debug:
-                print("  warning: no identity response within timeout; continuing anyway")
+            if not got:
+                self._dbg("warning: no identity response within timeout; continuing anyway")
         except Exception as e:
-            if self.debug:
-                print(f"  warning: identity query failed ({e}); continuing anyway")
+            self._dbg(f"warning: identity query failed ({e}); continuing anyway")
         self.send(build_enter_editor_mode())
         time.sleep(0.1)
 
@@ -1000,8 +1013,7 @@ class Device:
         self.outport.close()
 
     def send(self, full_msg: bytes):
-        if self.debug:
-            print(f"  -> {_describe(full_msg)}")
+        self._dbg(f"-> {_describe(full_msg)}")
         # mido wants the data BETWEEN F0 and F7, not the framing bytes themselves.
         self.outport.send(mido.Message("sysex", data=full_msg[1:-1]))
 
@@ -1014,22 +1026,27 @@ class Device:
         n = 0
         while self.inport.receive(block=False) is not None:
             n += 1
-        if self.debug and n:
-            print(f"  (flushed {n} pending message(s) before sending)")
+        if n:
+            self._dbg(f"(flushed {n} pending message(s) before sending)")
 
     def _drain_matching(self, cmd, sub, want, timeout_s, require_offset0=False):
+        # started/elapsed here is the actual measured round-trip for THIS
+        # request, distinct from self._t0 (session-wide, used by _dbg's
+        # per-line prefix) -- added 2026-09-29 to compare name-only vs
+        # full-dump request latency directly instead of eyeballing deltas
+        # between _dbg's timestamps by hand (see PROTOCOL_NOTES.md).
+        started = time.monotonic()
         chunks = []
         seen_offsets = set()
         seen_other = 0
-        deadline = time.monotonic() + timeout_s
+        deadline = started + timeout_s
         while time.monotonic() < deadline:
             msg = self.inport.receive(block=False)
             if msg is None:
                 time.sleep(0.01)
                 continue
             if msg.type != "sysex":
-                if self.debug:
-                    print(f"  <- non-sysex MIDI message: {msg}")
+                self._dbg(f"<- non-sysex MIDI message: {msg}")
                 continue
             full = bytes([0xF0, *msg.data, 0xF7])
             if is_sysex(full, cmd, sub):
@@ -1040,8 +1057,7 @@ class Device:
                     # traffic -- e.g. an echo of a write chunk still working
                     # its way through the device right after a flash write --
                     # and must not be mistaken for the read we asked for.
-                    if self.debug:
-                        print(f"  <- {_describe(full)}  [matched cmd/sub but offset "
+                    self._dbg(f"<- {_describe(full)}  [matched cmd/sub but offset "
                               f"({full[11]}/{full[12]}) != 0 -- ignoring stray chunk]")
                     continue
                 if offset_key in seen_offsets:
@@ -1050,22 +1066,21 @@ class Device:
                     # of a multi-chunk read -- accepting it would either
                     # double-count toward `want` or silently shadow the real
                     # chunk for that offset.
-                    if self.debug:
-                        print(f"  <- {_describe(full)}  [duplicate offset "
+                    self._dbg(f"<- {_describe(full)}  [duplicate offset "
                               f"({full[11]}/{full[12]}) -- ignoring]")
                     continue
                 seen_offsets.add(offset_key)
-                if self.debug:
-                    print(f"  <- {_describe(full)}  [MATCH, chunk {len(chunks) + 1}/{want}]")
+                self._dbg(f"<- {_describe(full)}  [MATCH, chunk {len(chunks) + 1}/{want}]")
                 chunks.append(full)
                 if len(chunks) == want:
+                    self._dbg(f"(all {want} chunk(s) received in {time.monotonic() - started:.3f}s)")
                     return chunks
             else:
                 seen_other += 1
-                if self.debug:
-                    print(f"  <- {_describe(full)}  [did not match expected cmd=0x{cmd:02X} sub=0x{sub:02X}]")
-        if self.debug and not chunks:
-            print(f"  (timed out after {timeout_s}s; {seen_other} other sysex message(s) seen, 0 matched)")
+                self._dbg(f"<- {_describe(full)}  [did not match expected cmd=0x{cmd:02X} sub=0x{sub:02X}]")
+        if not chunks:
+            self._dbg(f"(timed out after {time.monotonic() - started:.3f}s of {timeout_s}s budget; "
+                      f"{seen_other} other sysex message(s) seen, 0 matched)")
         return chunks if len(chunks) == want else None
 
     def read_name(self, slot: int, retries=RETRY_COUNT) -> str:
@@ -1201,8 +1216,7 @@ class Device:
             self.send(build_preset_change(park))
             time.sleep(0.3)
         for i, c in enumerate(chunks):
-            if self.debug:
-                print(f"  -> chunk {i + 1}/{len(chunks)}: {_describe(c)}")
+            self._dbg(f"-> chunk {i + 1}/{len(chunks)}: {_describe(c)}")
             self.outport.send(mido.Message("sysex", data=c[1:-1]))
             # There's no ACK/NAK on this write path -- the protocol gives no
             # per-chunk confirmation at all (confirmed against both reference
@@ -1218,8 +1232,7 @@ class Device:
         time.sleep(settle_s)
         if commit:
             name = prst_file_name(file_bytes)
-            if self.debug:
-                print(f"  -> sending experimental save-commit finalize for {name!r}")
+            self._dbg(f"-> sending experimental save-commit finalize for {name!r}")
             self.send(build_save_commit(name, slot))
             time.sleep(0.4)
         # Explicitly select the target slot -- the reference editor always
@@ -1240,8 +1253,7 @@ class Device:
         time.sleep(0.2)
         for eff in preset["effects"]:
             si = eff["slotIndex"]
-            if self.debug:
-                print(f"  -> block {si}: effect 0x{eff['effectId']:08X}, "
+            self._dbg(f"-> block {si}: effect 0x{eff['effectId']:08X}, "
                       f"{'on' if eff['enabled'] else 'off'}")
             self.send(build_effect_change(si, eff["effectId"]))
             time.sleep(0.03)
@@ -1428,12 +1440,22 @@ def cmd_list_ports(args):
 def cmd_list(args):
     dev = Device(args.port, debug=args.debug)
     try:
+        started = time.monotonic()
+        timeouts = 0
         for slot in range(TOTAL_SLOTS):
             try:
                 name = dev.read_name(slot)
             except TimeoutError:
                 name = "(no response)"
+                timeouts += 1
             print(f"{slot_to_label(slot):>4}  {name}")
+        # Unconditional, not --debug-only: a one-line total is cheap to print
+        # and directly answers "how long did this actually take" without
+        # needing a debug trace -- added 2026-09-29 while comparing `list`'s
+        # real-world speed against `export --all` (see PROTOCOL_NOTES.md).
+        elapsed = time.monotonic() - started
+        print(f"\n{TOTAL_SLOTS} slots read in {elapsed:.1f}s"
+              + (f" ({timeouts} timeout(s))" if timeouts else ""))
     finally:
         dev.close()
 
@@ -1511,6 +1533,7 @@ def cmd_export(args):
         if slots is not None:
             entries = {}
             skipped_labels = []
+            started = time.monotonic()
             for slot in slots:
                 label = slot_to_label(slot)
                 try:
@@ -1522,8 +1545,13 @@ def cmd_export(args):
                 except TimeoutError as e:
                     print(f"{label}: skipped ({e})")
                     skipped_labels.append(label)
+            elapsed = time.monotonic() - started
             write_zip(entries, out_path)
-            print(f"Wrote {len(entries)} patches to {out_path}")
+            # Same unconditional total as `list` prints (2026-09-29) -- these
+            # two commands' per-slot timing are being compared directly, so
+            # both need to report it the same way without requiring --debug.
+            print(f"Wrote {len(entries)} patches to {out_path}  "
+                  f"({len(slots)} slots read in {elapsed:.1f}s)")
             # A zip has no concept of "empty slot" -- it's just however many
             # entries got written. `upload` later fills slots consecutively
             # from wherever ITS destination argument says, in zip order --

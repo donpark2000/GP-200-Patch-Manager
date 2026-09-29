@@ -1,9 +1,20 @@
-import importlib.util
+import importlib.util, time
 from pathlib import Path
 GP200_PATH = str(Path(__file__).resolve().parent.parent / "gp200.py")
 spec = importlib.util.spec_from_file_location("gp200", GP200_PATH)
 gp200 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gp200)
+
+def new_bare_device():
+    """Device.__new__ bypasses __init__ (no real MIDI ports here), so the
+    handful of attributes __init__ would normally set must be filled in by
+    hand. _t0 joined that list 2026-09-29 when --debug lines gained elapsed-
+    time prefixes (see PROTOCOL_NOTES.md): _dbg() reads self._t0 whenever
+    self.debug is True, which every scenario below sets, so every bypassed
+    instance needs it now too."""
+    dev = gp200.Device.__new__(gp200.Device)
+    dev._t0 = time.monotonic()
+    return dev
 
 class FakeMsg:
     def __init__(self, data):
@@ -45,7 +56,7 @@ def make_data_between(cmd, sub, off_lo, off_hi, payload_len=10):
 stray = FakeMsg(make_data_between(0x12, 0x18, 0x39, 0x01))   # offset 185 stray
 real  = FakeMsg(make_data_between(0x12, 0x18, 0x00, 0x00))   # offset 0, the real name chunk
 
-dev = gp200.Device.__new__(gp200.Device)  # bypass __init__ (no real MIDI ports)
+dev = new_bare_device()
 dev.debug = True
 dev.inport = FakePort([stray, real])
 
@@ -60,7 +71,7 @@ print("PASS: stray offset!=0 chunk was correctly skipped, real offset-0 chunk ac
 offsets = [(0x00,0x00),(0x39,0x01),(0x72,0x02),(0x2b,0x04),(0x64,0x05),(0x1d,0x07),(0x56,0x08)]
 queue = [FakeMsg(make_data_between(0x12, 0x18, 0x39, 0x01))]  # duplicate/stray of offset #2, arrives first
 queue += [FakeMsg(make_data_between(0x12, 0x18, lo, hi)) for lo, hi in offsets]
-dev2 = gp200.Device.__new__(gp200.Device)
+dev2 = new_bare_device()
 dev2.debug = True
 dev2.inport = FakePort(queue)
 result2 = dev2._drain_matching(0x12, 0x18, 7, timeout_s=1.0)
@@ -71,7 +82,7 @@ assert got_offsets == sorted(offsets), (got_offsets, sorted(offsets))
 print("PASS: duplicate offset was ignored, all 7 real unique offsets collected\n")
 
 # Scenario 3: _flush_pending drains everything currently queued.
-dev3 = gp200.Device.__new__(gp200.Device)
+dev3 = new_bare_device()
 dev3.debug = True
 dev3.inport = FakePort([FakeMsg(b"\x00"*3) for _ in range(4)])
 dev3._flush_pending()
