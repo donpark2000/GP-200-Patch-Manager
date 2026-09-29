@@ -1802,6 +1802,22 @@ plugged/unplugged beforehand, and ideally trying `reread` on the
 specific failing slot(s) again before touching anything, to see whether
 the same two offsets (0x43/0x9F) are still the only things unstable.
 
+**One more candidate ruled out:** CPU/system load (an RFI variant of the
+theory -- the fan spinning up as a proxy for the computer working harder,
+possibly delaying how promptly python-rtmidi's Windows backend services
+its MIDI receive buffer; see that backend's own documented fixed-buffer
+limitation, cited in `reread`'s docstring). Tested directly: pegged all
+CPU cores at 100% (PowerShell background jobs, confirmed via Task
+Manager, fan audibly engaged) and ran `export --all` twice against that
+load. Both clean, 256/256. So audio cables in, audio cables out, and
+now heavy CPU load, have all failed to reproduce the original failure.
+Stopping active investigation here -- the single bad run remains
+unexplained, but 7 consecutive clean runs across three different
+conditions (cables out, cables back in, CPU pegged) is enough to call it
+dormant rather than chase further today.
+The next planned data point is a run on a second, different computer,
+whenever that happens.
+
 ## `export`: a visible progress indicator, and skip message simplified again (2026-09-29)
 
 With the console noise cleaned up over two earlier rounds, a long
