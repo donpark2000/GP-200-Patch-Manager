@@ -1249,9 +1249,9 @@ class Device:
                 return assemble_chunks(chunks)
         raise TimeoutError(f"no response reading slot {slot_to_label(slot)} (expected 7 chunks)")
 
-    def read_dump_confirmed(self, slot: int, tries: int = 5) -> bytes:
+    def read_dump_confirmed(self, slot: int, tries: int = 7) -> bytes:
         """Like read_dump, but re-reads up to `tries` times (minimum 2,
-        default 5) and returns as soon as ANY two of those reads agree
+        default 7) and returns as soon as ANY two of those reads agree
         (via raw_dumps_agree, which ignores RAW_DUMP_IGNORE_OFFSETS --
         see that function) -- not just two in a row. If none of the `tries`
         reads ever agree with each other, raises ReadNotConfirmedError
@@ -1265,8 +1265,8 @@ class Device:
         true content), so "never agree" requires at most 1 clean read out
         of `tries`. With the independently measured ~12-15%-per-read glitch
         rate, P(<=1 clean out of 3) works out to roughly 5%, matching what
-        was observed; P(<=1 clean out of 5) is roughly 0.1% -- about a 50x
-        drop -- because getting 4-or-5 bad reads out of 5 is far rarer than
+        was observed; P(<=1 clean out of 5) works out to roughly 0.1-0.2%
+        -- because getting 4-or-5 bad reads out of 5 is far rarer than
         getting 2-or-3 bad out of 3. This costs nothing in the common case:
         the loop still returns as soon as any two reads agree, so slots that
         confirm in 2 reads (the large majority) are unaffected; only the
@@ -1279,6 +1279,43 @@ class Device:
         than being fully random, so this isn't impossible -- just far less
         likely than the dominant failure mode this fix targets, since any
         specific wrong value is much rarer than the correct one.)
+
+        Raised again, 5 -> 7, plus graduated delays before the later
+        attempts (2026-09-29), after a real 255-slot run hit "never agreed"
+        on 3/255 slots (~1.2%) at tries=5 -- roughly 5-10x the ~0.1-0.2%
+        the model above predicts (expected ~0.3-0.5 failures across that
+        many slots). A Poisson check against that expected rate puts
+        P(observing >=3) at only about 1-2%: rare enough to take as a real
+        signal rather than dismiss as noise, but not so rare that it rules
+        out "the i.i.d. model above is directionally right but the true
+        per-read glitch rate is a bit higher than measured." The two
+        changes here hedge against two different explanations rather than
+        betting on one:
+          - If the glitches really are independent per-read noise, more
+            tries helps a lot: going from 5 to 7 drops the model's P(never
+            agree) from ~0.1-0.2% to roughly 0.01%, because the dominant
+            failure term (needing n-1 bad reads before a single clean one)
+            falls off fast with n.
+          - If instead some glitches come in correlated bursts -- e.g. the
+            host MIDI stack still catching up from back-to-back requests,
+            already the leading theory for the unrelated sub=0x20
+            first-attempt-timeout mystery elsewhere in this file -- then
+            more *immediate* retries wouldn't help much, since a burst can
+            span several back-to-back reads regardless of how many are
+            attempted. Inserting a short pause specifically before the
+            later, already-rare attempts gives the host stack a chance to
+            settle before trying again. This only fires on the small tail
+            of slots that need more than 3 attempts, so it costs nothing on
+            the common path: 250ms before attempt 4, 500ms before every
+            attempt after that (matching the shape suggested directly:
+            "wait 250 msec after read 3 and if it still fails, wait
+            500msec after read 4").
+        Both changes are cheap and reversible tuning, not a claim about
+        which theory is correct -- the self._dbg() diagnostics below are
+        left in place specifically so the next real run with --debug can
+        show whether failing slots now confirm (on attempt 4+, after a
+        delay) or still never agree at all, which would point squarely at
+        a cause other than transient read noise.
 
         IMPORTANT (found via real hardware testing, 2026-09-27): this
         compares using raw_dumps_agree, NOT raw `==`. A real test showed
@@ -1337,6 +1374,18 @@ class Device:
             raise ValueError("read_dump_confirmed needs at least 2 tries")
         seen = []
         for i in range(1, tries + 1):
+            # Graduated delay before the later, already-rare attempts only
+            # (see docstring above, 2026-09-29) -- zero cost on the common
+            # path, since most slots confirm by attempt 2 and never reach
+            # attempt 4 at all.
+            if i == 4:
+                self._dbg(f"read_dump_confirmed({slot_to_label(slot)}): "
+                          f"attempt {i} -- pausing 250ms first")
+                time.sleep(0.25)
+            elif i >= 5:
+                self._dbg(f"read_dump_confirmed({slot_to_label(slot)}): "
+                          f"attempt {i} -- pausing 500ms first")
+                time.sleep(0.5)
             cur = self.read_dump(slot)
             for j, prior in enumerate(seen, start=1):
                 if raw_dumps_agree(cur, prior):
@@ -1609,8 +1658,18 @@ def cmd_list(args):
                 # request this used to use pays a ~READ_TIMEOUT_S tax on
                 # every single slot that the full-dump request never does.
                 name = dev.read_name_via_dump(slot)
-            except TimeoutError:
-                name = "(no response)"
+            except TimeoutError as e:
+                # Used to print the bare name column as "(no response)" --
+                # easy to skim right past in a 256-line list, and easy to
+                # mistake for a patch that's actually just named that.
+                # 2026-09-29, direct feedback: "does list output print an
+                # error if a slot could not be read or just omit it? I think
+                # it should say 'Error reading patch <patch number>'". This
+                # doesn't omit the slot (the label still prints at left) but
+                # now makes the failure impossible to miss, and reuses
+                # describe_read_failure's phrasing so a failure reads the
+                # same way here as it does from `export`.
+                name = f"*** error reading this patch: {describe_read_failure(e)} ***"
                 timeouts += 1
             print(f"{slot_to_label(slot):>4}  {name}")
         # Unconditional, not --debug-only: a one-line total is cheap to print

@@ -49,6 +49,13 @@ spec = importlib.util.spec_from_file_location("gp200", GP200_PATH)
 gp200 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gp200)
 
+# read_dump_confirmed now pauses (250ms/500ms) before its later attempts
+# (2026-09-29) -- the "never confirms" fake below runs its full default
+# budget for real, so without this the quiet-output checks would cost a
+# couple of real seconds apiece for no reason. No-op it here; the delay
+# schedule itself is covered in test_read_dump_confirmed.py.
+gp200.time.sleep = lambda s: None
+
 failures = []
 def check(name, cond):
     print(("[PASS] " if cond else "[FAIL] ") + name)
@@ -171,9 +178,11 @@ def _dump_with_marker(value: int) -> bytes:
     return bytes(buf)
 
 
-# 5 mutually-distinct dumps -- read_dump_confirmed's default tries=5 will
-# exhaust its whole budget without any two ever agreeing with each other.
-NEVER_AGREE_SEQUENCE = [_dump_with_marker(v) for v in (0x11, 0x22, 0x33, 0x44, 0x55)]
+# 7 mutually-distinct dumps -- read_dump_confirmed's default tries=7 (raised
+# from 5 on 2026-09-29) will exhaust its whole budget without any two ever
+# agreeing with each other.
+NEVER_AGREE_SEQUENCE = [_dump_with_marker(v) for v in
+                        (0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77)]
 
 
 class FakeDevNeverAgrees:

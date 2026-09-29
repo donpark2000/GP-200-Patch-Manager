@@ -12,6 +12,14 @@ def check(name, cond):
     if not cond:
         failures.append(name)
 
+# read_dump_confirmed now sleeps before its later, already-rare attempts
+# (2026-09-29, see the method's docstring: 250ms before attempt 4, 500ms
+# before every attempt after that). Patched to a no-op that just records
+# what it was asked to sleep for, so this file can assert the exact delay
+# schedule without actually taking several real seconds per test.
+sleep_calls = []
+gp200.time.sleep = lambda s: sleep_calls.append(s)
+
 
 class FakeDevSequence:
     """A bare object standing in for Device, with just enough to exercise
@@ -101,34 +109,62 @@ except gp200.ReadNotConfirmedError:
 check("read_dump_confirmed: tries=2 with two disagreeing reads raises, not silently returns one",
       raised6 is True)
 
-# --- default tries is now 5, not 3 (2026-09-27, PROTOCOL_NOTES.md finding
-#     11) -- a real 256-slot export run showed 3-tries has a measurable
-#     (~3.5%) "never agreed" rate at scale. Prove the new default actually
-#     gives the extra headroom: 4 mutually-distinct reads followed by a 5th
-#     that finally matches the FIRST one (non-consecutive, deliberately) --
-#     old default=3 would have exhausted its budget and raised after read 3;
-#     the new default=5 must keep going and confirm on read 5. Called with NO
-#     `tries` argument at all, so this only passes if the default truly
-#     changed. ---
-BAD2, BAD3, BAD4 = b"\x04" * 10, b"\x05" * 10, b"\x06" * 10
-dev_default5 = FakeDevSequence([GOOD, BAD, BAD2, BAD3, GOOD])
-result_default5 = gp200.Device.read_dump_confirmed(dev_default5, 5)
-check("read_dump_confirmed: default tries is now 5, not 3 -- confirms on the 5th "
-      "read matching the 1st, a case the old default=3 would have missed entirely",
-      result_default5 == GOOD and dev_default5.calls == 5)
+# --- default tries is now 7, not 5 (2026-09-29, second bump -- see the
+#     method's docstring) -- a real 255-slot export run showed 5-tries still
+#     had a "never agreed" rate (3/255, ~1.2%) well above what the model for
+#     tries=5 predicts. Prove the new default actually gives the extra
+#     headroom: 6 mutually-distinct reads followed by a 7th that finally
+#     matches the FIRST one (non-consecutive, deliberately) -- old default=5
+#     would have exhausted its budget and raised after read 5; the new
+#     default=7 must keep going and confirm on read 7. Called with NO `tries`
+#     argument at all, so this only passes if the default truly changed. ---
+BAD2, BAD3, BAD4, BAD5 = b"\x04" * 10, b"\x05" * 10, b"\x06" * 10, b"\x07" * 10
+dev_default7 = FakeDevSequence([GOOD, BAD, BAD2, BAD3, BAD4, BAD5, GOOD])
+result_default7 = gp200.Device.read_dump_confirmed(dev_default7, 5)
+check("read_dump_confirmed: default tries is now 7, not 5 -- confirms on the 7th "
+      "read matching the 1st, a case the old default=5 would have missed entirely",
+      result_default7 == GOOD and dev_default7.calls == 7)
+check("read_dump_confirmed: the new default's extra attempts (4-7) each paused first, "
+      "250ms then 500ms/500ms/500ms, exactly as documented",
+      sleep_calls == [0.25, 0.5, 0.5, 0.5])
+sleep_calls.clear()
 
-# --- and the flip side: with the new default, 5 mutually-distinct reads
+# --- and the flip side: with the new default, 7 mutually-distinct reads
 #     (never any two agreeing) still correctly raises rather than looping
 #     forever or silently returning something ---
-dev_default5_fail = FakeDevSequence([GOOD, BAD, BAD2, BAD3, BAD4])
-raised_default5 = None
+BAD6 = b"\x08" * 10
+dev_default7_fail = FakeDevSequence([GOOD, BAD, BAD2, BAD3, BAD4, BAD5, BAD6])
+raised_default7 = None
 try:
-    gp200.Device.read_dump_confirmed(dev_default5_fail, 5)
+    gp200.Device.read_dump_confirmed(dev_default7_fail, 5)
 except gp200.ReadNotConfirmedError:
-    raised_default5 = True
-check("read_dump_confirmed: default tries=5 still raises cleanly when nothing ever "
-      "agrees across all 5 attempts",
-      raised_default5 is True and dev_default5_fail.calls == 5)
+    raised_default7 = True
+check("read_dump_confirmed: default tries=7 still raises cleanly when nothing ever "
+      "agrees across all 7 attempts",
+      raised_default7 is True and dev_default7_fail.calls == 7)
+check("read_dump_confirmed: still paused before each of the 4 later attempts even "
+      "though none of them ever confirmed",
+      sleep_calls == [0.25, 0.5, 0.5, 0.5])
+sleep_calls.clear()
+
+# --- the delay only applies to the rare tail: a slot needing 3 tries or
+#     fewer (the large majority in practice) must never sleep at all ---
+dev_no_delay = FakeDevSequence([BAD, GOOD, GOOD])  # 2nd and 3rd agree
+gp200.Device.read_dump_confirmed(dev_no_delay, 5, tries=3)
+check("read_dump_confirmed: no delay at all when confirmation happens within 3 tries",
+      sleep_calls == [])
+
+# --- the pre-attempt pause is itself --debug diagnostic detail, same as the
+#     agreement/disagreement lines it sits alongside ---
+dev_delay_dbg = FakeDevSequence([b"\x09" * 10, b"\x0a" * 10, b"\x0b" * 10, b"\x09" * 10],
+                                 debug=True)
+out_delay_dbg = io.StringIO()
+with contextlib.redirect_stdout(out_delay_dbg):
+    gp200.Device.read_dump_confirmed(dev_delay_dbg, 5)
+text_delay_dbg = out_delay_dbg.getvalue()
+check("read_dump_confirmed: --debug shows the pause before attempt 4",
+      "pausing 250ms" in text_delay_dbg)
+sleep_calls.clear()
 
 # --- tries < 2 is rejected outright -- confirming anything needs at least 2 reads ---
 rejected = False

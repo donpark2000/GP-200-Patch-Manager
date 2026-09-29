@@ -1627,3 +1627,91 @@ still point at the README.
 **Still outstanding, not yet addressed**: the user mentioned this most
 recent real run had "a few failures" and is sending the console log
 separately -- not yet reviewed as of this writeup.
+
+## `read_dump_confirmed` reliability: 5 tries wasn't enough either (2026-09-29)
+
+The "a few failures" mentioned above turned out to be concrete: a real
+255-slot run hit `read_dump_confirmed`'s `ReadNotConfirmedError` ("never
+agreed") on 3 slots (~1.2%) at `tries=5`. That's notably worse than the
+model in `read_dump_confirmed`'s own docstring predicts for `tries=5`:
+with the independently-measured ~12-15%-per-read glitch rate, `P(<=1
+clean read out of 5)` works out to roughly 0.1-0.2%, i.e. ~0.3-0.5
+expected failures across 255-256 slots, not 3. A Poisson check against
+that expected rate puts `P(observing >=3)` at only about 1-2% -- rare
+enough to treat as a real signal, not so rare that it rules out "the
+model is directionally right but the true glitch rate runs a bit hotter
+in practice than the earlier measurement."
+
+Rather than bet on one explanation, two independent, low-risk changes
+went in together, because they each address a different plausible cause
+and neither costs anything on the common (fast-confirming) path:
+
+1. **`tries` raised 5 -> 7.** If the glitches really are independent
+   per-read noise, this helps a lot on its own: the dominant "never
+   agree" term (needing `tries - 1` bad reads before a single clean one)
+   falls off fast with `tries`, so 7 should drop the model's predicted
+   rate from ~0.1-0.2% to roughly 0.01% -- back near "shouldn't ever
+   realistically see it at 256-slot scale."
+2. **Graduated delay before the later attempts.** If some glitches
+   instead come in correlated bursts -- e.g. the host MIDI stack still
+   catching up from back-to-back requests, already the leading theory
+   for the unrelated `sub=0x20` first-attempt-always-times-out mystery
+   elsewhere in this file -- then more *immediate* retries wouldn't help
+   much, since a burst can span several consecutive reads regardless of
+   how many are attempted. `read_dump_confirmed` now pauses 250ms before
+   attempt 4, and 500ms before every attempt after that, matching the
+   shape suggested directly: *"wait 250 msec after read 3 and if it
+   still fails, wait 500msec after read 4."* This only fires on the
+   small tail of slots that need more than 3 attempts, so the large
+   majority of slots (which confirm in 2) are completely unaffected.
+
+Both changes are cheap, reversible tuning, not a claim about which
+theory is correct. The existing `--debug` diagnostics (`self._dbg()`
+calls inside `read_dump_confirmed`, already gated per the entry above)
+are left in place specifically so the *next* real run with `--debug` can
+distinguish the two theories: if failing slots now confirm on attempt
+4+ (after a pause), that's evidence for the correlated/timing theory; if
+some still never agree even after 7 tries and all the pauses, that
+points at something other than transient read noise entirely (or that
+the per-read glitch rate is simply higher than the ~12-15% measured
+earlier and needs re-measuring).
+
+Tests: `test_read_dump_confirmed.py`'s default-tries coverage was
+updated from 5 to 7 attempts (both the confirms-on-the-last-try and
+never-agrees cases), plus new checks that the delay schedule is exactly
+`[0.25, 0.5, 0.5, 0.5]` before attempts 4-7, that a slot confirming
+within 3 tries never sleeps at all, and that the pause itself shows up
+in `--debug` output. `time.sleep` is patched to a no-op (recording what
+it was asked to sleep for) in both `test_read_dump_confirmed.py` and
+`test_export_quiet_output.py` so these checks run instantly instead of
+costing several real seconds per test.
+
+## `list`: a failed slot was easy to miss (2026-09-29)
+
+Direct question: *"does list output print an error if a slot could not
+be read or just omit it? I think it should say 'Error reading patch
+<patch number>'."* Verified: `list` never omits a slot -- every slot's
+label always prints -- but a failed read's name column just showed
+`"(no response)"`, which blends in easily when skimming 256 lines and
+could in principle be mistaken for a patch that's genuinely named that.
+
+Changed the placeholder to `f"*** error reading this patch: {describe_read_failure(e)} ***"`,
+reusing the same plain-language phrasing `export` already uses for the
+identical underlying failure (`describe_read_failure`, added earlier in
+this file's history) rather than inventing new wording -- so a failure
+reads the same way whether it shows up in `list` or `export`. Slightly
+different from the user's exact suggested text (which would have
+repeated the slot number redundantly, since the label already prints in
+the column to its left), but keeps the spirit: unmistakable, plain
+language, not a debug dump.
+
+Note: `read_name_via_dump` (what `list` actually calls) uses a bare
+`read_dump`, not `read_dump_confirmed` -- see that method's own
+docstring for why (a wrong name once in a while is cosmetic). So the
+only failure `list` can report here is a genuine dead-silence timeout,
+never a `ReadNotConfirmedError`; `describe_read_failure` already handles
+that correctly since it distinguishes the two.
+
+Tests: `test_debug_timing.py`'s existing `cmd_list` timeout-counting
+scenario gained checks that the failed slot's label still prints and
+that its name column carries the new unmistakable error text.

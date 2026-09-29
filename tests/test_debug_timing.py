@@ -141,6 +141,17 @@ check("list: prints a summary line even without --debug",
       re.search(rf"{gp200.TOTAL_SLOTS} slots read in \d+\.\d+s", out5) is not None)
 check("list: counts and reports the one simulated timeout",
       "(1 timeout(s))" in out5)
+# 2026-09-29, direct feedback: "does list output print an error if a slot
+# could not be read or just omit it? I think it should say 'Error reading
+# patch <patch number>'" -- the failed slot's label must still be printed
+# (not omitted), paired with a failure message that's impossible to mistake
+# for an actual patch name, using the same plain-language phrasing `export`
+# already uses for the same underlying failure.
+check("list: a failed slot still prints its label -- it's never silently omitted",
+      f"{gp200.slot_to_label(3):>4}" in out5)
+check("list: a failed slot's name column is an unmistakable error, not a "
+      "blend-in placeholder like the old '(no response)'",
+      "*** error reading this patch: no response from the device ***" in out5)
 
 
 print()
