@@ -1818,6 +1818,46 @@ dormant rather than chase further today.
 The next planned data point is a run on a second, different computer,
 whenever that happens.
 
+**That second-computer test happened, and found the likely real answer.**
+Installing Valeton's own ASIO driver on a laptop produced much WORSE
+symptoms than anything seen on the desktop -- frequent dropouts, and
+`list-ports` sometimes failing to see the device at all. This is,
+apparently, a known Windows/Valeton USB-MIDI incompatibility in the wider
+GP-200 user community (reported to also affect firmware updates and
+NAM/IR loading, i.e. not specific to this tool or even to SysEx dumps
+specifically) -- with a known fix: in Device Manager, rebind the GP-200's
+MIDI sub-device from Valeton's own driver to Windows' generic USB MIDI
+class driver. Doing that made the laptop's connection reliable. Several
+subsequent `export --all` runs there finished clean, though the new
+progress dots visibly paused a couple of times per run -- `read_dump_confirmed`
+needing more than one attempt to confirm a slot, exactly the scenario the
+retry design exists for, and not a new problem (if anything, it's the
+first time that mechanism's normal operation has been directly visible
+rather than inferred from a final skip count).
+
+This likely reframes the whole investigation above, rather than adding a
+separate cause alongside it: `python-rtmidi`'s Windows backend using "a
+small number of fixed-size preallocated buffers" (cited in `reread`'s own
+docstring, from upstream issue reports, well before any of this session's
+testing) was always the leading theory for host-side receive instability
+-- this is now a concrete, real-world case of exactly that class of
+problem, severe enough to be independently known and documented by the
+user community, with a known driver-level cause and fix. It also offers a
+tidier explanation for the earlier "always exactly file offset 0x43
+and/or 0x9F, never anywhere else" finding: random transport noise would
+be expected to land anywhere in a dump, but a structural bug in
+fixed-size buffer reuse -- stale or leftover data bleeding into a
+consistent RELATIVE position within every reconstructed message -- would
+produce exactly the kind of reproducible, always-the-same-two-bytes
+fingerprint observed, rather than being a second, unrelated mystery.
+Whether it's Valeton's driver, Windows' own MIDI stack, or (per the
+user's own account) something that changed in one direction or the other
+around a Windows update either side had been depending on, this is a
+driver/OS-level issue outside this tool's control, and the existing
+tries=7 + graduated-delay retry design (see above) is the right and
+apparently sufficient accommodation for it. No further code changes
+planned on this front -- closing out this investigation thread here.
+
 ## `export`: a visible progress indicator, and skip message simplified again (2026-09-29)
 
 With the console noise cleaned up over two earlier rounds, a long
