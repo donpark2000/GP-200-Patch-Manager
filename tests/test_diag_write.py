@@ -1,4 +1,4 @@
-import argparse, importlib.util, io, contextlib, os, tempfile
+import argparse, importlib.util, io, contextlib, os, tempfile, time
 from pathlib import Path
 
 GP200_PATH = str(Path(__file__).resolve().parent.parent / "gp200.py")
@@ -47,10 +47,19 @@ def make_args(**overrides):
 
 
 class FakeDevDiag:
+    # read_dump_confirmed below calls the REAL Device.read_dump_confirmed,
+    # which as of 2026-09-29 gates its retry-diagnostic prints behind
+    # self.debug (previously unconditional -- see PROTOCOL_NOTES.md) via
+    # self._dbg(); both attributes are needed for that real method to run
+    # against this fake at all now, not just against a real Device.
+    debug = False
+    _dbg = gp200.Device._dbg
+
     def __init__(self, backup_reads):
         self.backup_reads = list(backup_reads)
         self.write_calls = 0
         self.closed = False
+        self._t0 = time.monotonic()
     def read_dump(self, slot):
         return self.backup_reads.pop(0)
     def read_dump_confirmed(self, slot, tries=3):

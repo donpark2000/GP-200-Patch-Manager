@@ -140,6 +140,31 @@ check("build_prst_from_dump recomputed checksum matches original skeleton checks
 check("build_prst_from_dump output length matches skeleton length",
       len(rebuilt) == len(skeleton_bytes))
 
+# build_prst_from_dump's "(overlaid ...)" accounting line used to print on
+# EVERY call, unconditionally -- meaning once per slot on a batch export,
+# 256 extra lines on a full `export --all` with nothing wrong to report.
+# Gated behind a `debug` parameter as of 2026-09-29, per direct feedback
+# after a real 256-slot run: "a lot of extra output that should probably be
+# suppressed unless -d is used." Defaults to False (quiet), matches True.
+import contextlib as _contextlib, io as _io
+_buf_default = _io.StringIO()
+with _contextlib.redirect_stdout(_buf_default):
+    gp200.build_prst_from_dump(fake_dump, "TEST", bytearray(skeleton_bytes))
+check("build_prst_from_dump: prints nothing by default (debug defaults to False)",
+      _buf_default.getvalue() == "")
+
+_buf_quiet = _io.StringIO()
+with _contextlib.redirect_stdout(_buf_quiet):
+    gp200.build_prst_from_dump(fake_dump, "TEST", bytearray(skeleton_bytes), debug=False)
+check("build_prst_from_dump: prints nothing with debug=False explicitly",
+      _buf_quiet.getvalue() == "")
+
+_buf_debug = _io.StringIO()
+with _contextlib.redirect_stdout(_buf_debug):
+    gp200.build_prst_from_dump(fake_dump, "TEST", bytearray(skeleton_bytes), debug=True)
+check("build_prst_from_dump: with debug=True, still prints the overlay accounting line",
+      "overlaid" in _buf_debug.getvalue())
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

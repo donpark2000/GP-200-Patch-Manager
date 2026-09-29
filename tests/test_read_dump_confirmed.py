@@ -1,4 +1,4 @@
-import importlib.util, io, contextlib
+import importlib.util, io, contextlib, time
 from pathlib import Path
 
 GP200_PATH = str(Path(__file__).resolve().parent.parent / "gp200.py")
@@ -15,10 +15,21 @@ def check(name, cond):
 
 class FakeDevSequence:
     """A bare object standing in for Device, with just enough to exercise
-    read_dump_confirmed (an unbound method called as gp200.Device.read_dump_confirmed(self, ...))."""
-    def __init__(self, dumps):
+    read_dump_confirmed (an unbound method called as gp200.Device.read_dump_confirmed(self, ...)).
+
+    `debug` defaults to False (matching real Device) and `_t0` is set so
+    the reused `_dbg` method below works -- as of 2026-09-29,
+    read_dump_confirmed's retry-diagnostic lines are gated behind
+    `self.debug` (previously unconditional; see the method's docstring),
+    so any stand-in for Device needs both attributes now, not just real
+    Device instances."""
+    _dbg = gp200.Device._dbg  # reuse the real implementation, not a copy of its logic
+
+    def __init__(self, dumps, debug=False):
         self.dumps = list(dumps)
         self.calls = 0
+        self.debug = debug
+        self._t0 = time.monotonic()
     def read_dump(self, slot):
         self.calls += 1
         return self.dumps.pop(0)
@@ -131,7 +142,14 @@ check("read_dump_confirmed: tries=1 (or less) is rejected as a usage error",
 # --- diagnostic printing: on any disagreement (whether it's eventually
 #     resolved or not), read_dump_confirmed should show exactly what
 #     differed between the reads, in file-offset terms, not fail silently
-#     or force someone to guess what happened. ---
+#     or force someone to guess what happened -- but, as of 2026-09-29, only
+#     when --debug is on. This used to be unconditional; a real `export
+#     --all` run showed that printed ~12-15%-per-read glitch noise on a
+#     meaningful fraction of the 256 slots even when nothing was actually
+#     wrong, so it moved behind self.debug like every other diagnostic
+#     (direct feedback: "a lot of extra output that should probably be
+#     suppressed unless -d is used"). Both sides of that are covered below:
+#     silent by default, and still fully available with debug=True. ---
 import struct
 skeleton = gp200.resolve_skeleton_bytes(None)
 real_a = bytearray(skeleton)[gp200.CONTENT_FILE_START:gp200.CHECKSUM_OFF]
@@ -139,14 +157,29 @@ real_b = bytearray(real_a)
 real_b[0x9F - gp200.CONTENT_FILE_START] = 0xB7  # a real, previously-seen corrupted value
 real_a, real_b = bytes(real_a), bytes(real_b)
 
-dev7 = FakeDevSequence([real_a, real_b, real_a])  # 1st/3rd agree, 2nd differs
+# Default (debug=False): a diff-and-recover must stay QUIET on the console --
+# this is the actual behavior change being tested, not just a side effect.
+dev7_quiet = FakeDevSequence([real_a, real_b, real_a])  # 1st/3rd agree, 2nd differs
+out_quiet = io.StringIO()
+with contextlib.redirect_stdout(out_quiet):
+    result7_quiet = gp200.Device.read_dump_confirmed(dev7_quiet, 5, tries=3)
+check("read_dump_confirmed: still returns the right value when it needs a diff-and-recover "
+      "(debug off)",
+      result7_quiet == real_a)
+check("read_dump_confirmed: prints NOTHING on a diff-and-recover when --debug is off "
+      "(2026-09-29: this used to print unconditionally -- now it shouldn't)",
+      out_quiet.getvalue() == "")
+
+# debug=True: the same scenario, diagnostic detail must still be fully there.
+dev7 = FakeDevSequence([real_a, real_b, real_a], debug=True)  # 1st/3rd agree, 2nd differs
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
     result7 = gp200.Device.read_dump_confirmed(dev7, 5, tries=3)
 text7 = out.getvalue()
-check("read_dump_confirmed: still returns the right value when it needs a diff-and-recover",
+check("read_dump_confirmed: still returns the right value when it needs a diff-and-recover "
+      "(debug on)",
       result7 == real_a)
-check("read_dump_confirmed: prints something when reads disagree, not silent",
+check("read_dump_confirmed: prints something when reads disagree AND --debug is on",
       len(text7.strip()) > 0)
 check("read_dump_confirmed: the diagnostic names the actual byte offset that differed (0x9F)",
       "0x009F" in text7)

@@ -772,17 +772,27 @@ def decode_prst(file_bytes: bytes) -> dict:
     }
 
 
-def build_prst_from_dump(decoded: bytes, name: str, skeleton_bytes) -> bytes:
+def build_prst_from_dump(decoded: bytes, name: str, skeleton_bytes, debug: bool = False) -> bytes:
     """Overlay a live device dump onto a skeleton's content region and
     recompute the checksum. See EXPORT NOTES at the top of this file.
     `skeleton_bytes` is the skeleton's raw file content (see
-    resolve_skeleton_bytes), not a path."""
+    resolve_skeleton_bytes), not a path.
+
+    The "(overlaid N of M dump bytes...)" accounting line used to print
+    unconditionally, on every call -- meaning once per slot on a batch
+    export, 256 extra lines on a full `export --all` with nothing wrong to
+    report. Gated behind `debug` as of 2026-09-29, per direct feedback after
+    a real `export --all` run: "I also saw a lot of extra output that
+    should probably be suppressed unless -d is used." Defaults to False (a
+    free function, not a Device method, so it has no `self.debug` of its
+    own -- every caller passes its own debug flag through explicitly)."""
     out = bytearray(skeleton_bytes)
     end = min(CONTENT_FILE_START + len(decoded), CHECKSUM_OFF)
     overlay_len = end - CONTENT_FILE_START
     out[CONTENT_FILE_START:end] = decoded[:overlay_len]
-    print(f"  (overlaid {overlay_len} of {len(decoded)} dump bytes onto the skeleton; "
-          f"anything beyond byte {end} in the file keeps the skeleton's own value)")
+    if debug:
+        print(f"  (overlaid {overlay_len} of {len(decoded)} dump bytes onto the skeleton; "
+              f"anything beyond byte {end} in the file keeps the skeleton's own value)")
     struct.pack_into(">H", out, CHECKSUM_OFF, prst_checksum(out))
     return bytes(out)
 
@@ -1290,7 +1300,21 @@ class Device:
 
         Used by verify_write_full and by export, both of which care about
         byte-for-byte accuracy more than saving one or two extra ~1-2s
-        reads."""
+        reads.
+
+        These retry-diagnostic lines used to print unconditionally --
+        deliberately NOT gated behind --debug, on the theory that a
+        disagreeing read is exactly the situation that's hard to reason
+        about blind. In practice, on a real `export --all` (256 slots, each
+        one calling this with tries=5), that theory produced a genuinely
+        noisy normal-case console: nothing was wrong, but the retry-glitch
+        rate discussed above (~12-15% per read) meant a meaningful fraction
+        of slots printed 2+ extra lines apiece even on a fully successful
+        run. Changed 2026-09-29 to gate behind `self.debug` instead, per
+        direct feedback: "I also saw a lot of extra output that should
+        probably be suppressed unless -d is used." The detail is still
+        there for anyone who needs it -- just behind --debug now, same as
+        everything else diagnostic."""
         if tries < 2:
             raise ValueError("read_dump_confirmed needs at least 2 tries")
         seen = []
@@ -1300,20 +1324,18 @@ class Device:
                 if raw_dumps_agree(cur, prior):
                     if i > 2:
                         # Took more than the trivial first-two-agree case --
-                        # worth knowing on an otherwise silent success path.
-                        print(f"    read_dump_confirmed({slot_to_label(slot)}): read {i} "
-                              f"matches read {j} -- confirmed after {i} attempt(s)")
+                        # worth knowing on an otherwise silent success path,
+                        # but only when --debug is on (see docstring above).
+                        self._dbg(f"read_dump_confirmed({slot_to_label(slot)}): read {i} "
+                                  f"matches read {j} -- confirmed after {i} attempt(s)")
                     return cur
             if i > 1:
                 # Didn't match anything seen so far -- show exactly how it
-                # differs from every prior attempt, unconditionally (not
-                # gated behind --debug): this is precisely the situation
-                # that's hard to reason about blind, and printing only on
-                # eventual full failure would hide a lot of useful detail
-                # about *how* two disagreeing reads actually differ.
+                # differs from every prior attempt (see docstring above for
+                # why this is gated behind --debug now, not unconditional).
                 for j, prior in enumerate(seen, start=1):
-                    print(f"    read_dump_confirmed({slot_to_label(slot)}): "
-                          f"read {i} vs read {j}: {_describe_raw_dump_diff(prior, cur)}")
+                    self._dbg(f"read_dump_confirmed({slot_to_label(slot)}): "
+                              f"read {i} vs read {j}: {_describe_raw_dump_diff(prior, cur)}")
             seen.append(cur)
         raise ReadNotConfirmedError(
             f"{tries} read(s) of {slot_to_label(slot)} never agreed with "
@@ -1436,7 +1458,7 @@ class Device:
             return False, None, "(reads never agreed with each other)", None
         except TimeoutError:
             return False, None, "(no response)", None
-        roundtrip = build_prst_from_dump(dump, "verify", skeleton_bytes)
+        roundtrip = build_prst_from_dump(dump, "verify", skeleton_bytes, debug=self.debug)
         mismatches = diff_prst_content(file_bytes, roundtrip)
         return (len(mismatches) == 0), mismatches, prst_file_name(roundtrip), roundtrip
 
@@ -1668,7 +1690,8 @@ def cmd_export(args):
                     deps = find_ir_nam_dependencies(decoded)
                     if deps:
                         ir_nam_by_label[label] = deps
-                    data = normalize_export_dynamic_fields(build_prst_from_dump(decoded, name, skeleton))
+                    data = normalize_export_dynamic_fields(
+                        build_prst_from_dump(decoded, name, skeleton, debug=args.debug))
                     entries[f"{label}_{safe_filename(name)}.prst"] = data
                 except TimeoutError as e:
                     print(f"{label}: skipped ({e})")
@@ -1730,7 +1753,8 @@ def cmd_export(args):
                       "something else, will sound different -- with no warning either way. "
                       "See PROTOCOL_NOTES.md (Finding 11) / the README's 'Known limitations' "
                       "section.")
-            data = normalize_export_dynamic_fields(build_prst_from_dump(decoded, name, skeleton))
+            data = normalize_export_dynamic_fields(
+                build_prst_from_dump(decoded, name, skeleton, debug=args.debug))
             out_path = Path(args.out) if args.out else Path(f"{args.slot}_{safe_filename(name)}.prst")
             if not confirm_overwrite_file(out_path, args.force):
                 print("  skipped")
@@ -2089,7 +2113,8 @@ def cmd_diag_write(args):
         # confirmed read can't be gotten, better to stop here than proceed
         # with a write that has no reliable safety net behind it.
         try:
-            backup = build_prst_from_dump(dev.read_dump_confirmed(aliased), "backup", skeleton)
+            backup = build_prst_from_dump(dev.read_dump_confirmed(aliased), "backup", skeleton,
+                                           debug=args.debug)
         except TimeoutError as e:
             sys.exit(f"Couldn't back up {slot_to_label(aliased)} before writing ({e}) -- "
                       "aborting rather than writing without a safety copy.")
@@ -2267,7 +2292,7 @@ def cmd_reread(args):
                 # silently paper over exactly the instability it exists to
                 # surface, and this is precisely the test that discovered it.
                 dump = dev.read_dump(slot)
-                rebuilt = build_prst_from_dump(dump, "reread", skeleton)
+                rebuilt = build_prst_from_dump(dump, "reread", skeleton, debug=args.debug)
             except TimeoutError:
                 print(f"  [{i:2d}] (no response)")
                 results.append(None)
@@ -2412,7 +2437,7 @@ def _confirm_discrepancy(dev, slot, skeleton, file_bytes, roundtrip, n_reads):
             verdicts.append("no_response")
             time.sleep(0.2)
             continue
-        confirm_rt = build_prst_from_dump(dump, "confirm", skeleton)
+        confirm_rt = build_prst_from_dump(dump, "confirm", skeleton, debug=dev.debug)
         matches_bad = diff_prst_content(roundtrip, confirm_rt) == []
         matches_source = diff_prst_content(file_bytes, confirm_rt) == []
         if matches_source:

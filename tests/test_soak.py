@@ -54,6 +54,11 @@ class FakeDevBase:
         self.write_calls = 0
         self.settle_values = []
         self.closed = False
+        # _confirm_discrepancy passes build_prst_from_dump(..., debug=dev.debug)
+        # as of 2026-09-29 (suppressing its "(overlaid ...)" line unless -d is
+        # used) -- every Device stand-in needs this attribute now, not just
+        # real Device instances.
+        self.debug = False
     def write_slot(self, slot, fb, currently_active, commit=False, settle_s=1.0):
         self.write_calls += 1
         self.settle_values.append(settle_s)

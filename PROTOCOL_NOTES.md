@@ -1514,3 +1514,60 @@ names elsewhere in the file (`prst_to_preset`'s `.prst`-file decoder, and
 the raw-dump-diff offset namer) that use the FILE-offset layout (0xA0) for
 the same-shaped 11×72-byte blocks. Same shape, different base offset,
 easy to confuse -- hence `DUMP_`.
+
+## Two console-noise sources gated behind `--debug` (2026-09-29)
+
+Direct feedback after the first real end-to-end test of the IR/NAM warning
+above (which itself worked correctly -- a patch built to reference a
+User-IR AND both SnapTone positions at once was reported with all three,
+correctly labeled): "I also saw a lot of extra output that should probably
+be suppressed unless -d is used," from a real `export --all` console (256
+slots, 6.8s). Two sources, both previously unconditional:
+
+1. **`build_prst_from_dump`'s overlay-accounting line** (`"(overlaid N of M
+   dump bytes onto the skeleton...)"`) printed on every single call --
+   once per slot on a batch export, so 256 identical-shaped lines on a full
+   `export --all` even when every single byte accounted for exactly as
+   expected. Gained a `debug: bool = False` parameter; every call site
+   (`verify_write_full`, both of `cmd_export`'s paths, `cmd_diag_write`'s
+   backup, `cmd_reread`, `_confirm_discrepancy`) now threads its own
+   already-available debug flag (`self.debug`, `args.debug`, or `dev.debug`
+   depending on the call site) through explicitly, since this is a free
+   function with no `self` of its own.
+2. **`read_dump_confirmed`'s retry-diagnostic prints** (the "read N vs read
+   M: ... differ" and "read N matches read M -- confirmed after N
+   attempt(s)" lines). These were DELIBERATELY unconditional when first
+   written (see the method's docstring, prior version): the reasoning was
+   that a disagreeing read is exactly the situation that's hard to reason
+   about blind, so hiding it behind --debug felt like hiding the one thing
+   worth seeing. In practice, at the scale of a real 256-slot run, that
+   reasoning produced real noise instead: the independently-measured
+   ~12-15%-per-read glitch rate (see the `reread` command finding this
+   file already documents) means a meaningful fraction of slots print 2+
+   of these lines apiece even on a fully successful export with nothing
+   actually wrong. Switched the two `print()` calls to `self._dbg()`,
+   which is already gated on `self.debug` (the same helper the
+   elapsed-timestamp debug instrumentation above uses) -- the detail is
+   still fully available, just behind `--debug` now like everything else
+   diagnostic, rather than being the one exception to that rule.
+
+Both are one-line, low-risk changes in isolation, but every existing test
+that exercises the REAL `Device.read_dump_confirmed` or
+`Device.verify_write_full` against a hand-written fake (rather than faking
+those methods out entirely) needed that fake given a `.debug` attribute
+(and, where a real retry-diagnostic could actually fire, `._dbg`/`._t0`
+too) -- `self.debug` is now unconditionally read by `verify_write_full`
+regardless of whether anything ends up printing, since it's passed through
+as `build_prst_from_dump`'s `debug=` argument either way. Fixed in
+`test_diag_write.py`, `test_diagnostics_and_reread.py`, and
+`test_export_confirmed.py` (`test_soak.py` similarly needed `self.debug`
+added to `FakeDevBase`, for `_confirm_discrepancy`'s call). New coverage:
+`test_gp200.py` gained direct checks that `build_prst_from_dump` is quiet
+by default and verbose with `debug=True`; `test_read_dump_confirmed.py`
+gained the mirror image for the retry-diagnostic lines (including an
+explicit assertion that a diff-and-recover scenario prints NOTHING with
+debug off, which is the actual behavior change, not just a side effect);
+and a new `test_export_quiet_output.py` covers both mechanisms together,
+end-to-end through `cmd_export` itself, matching the shape of the real bug
+report rather than trusting that the two pieces being individually correct
+guarantees the combination is.

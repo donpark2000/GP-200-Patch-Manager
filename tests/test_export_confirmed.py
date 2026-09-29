@@ -1,4 +1,4 @@
-import argparse, importlib.util, io, contextlib, zipfile
+import argparse, importlib.util, io, contextlib, time, zipfile
 from pathlib import Path
 
 GP200_PATH = str(Path(__file__).resolve().parent.parent / "gp200.py")
@@ -43,11 +43,21 @@ class FakeDevExport:
     """A single-slot read glitches once, then agrees -- read_dump_confirmed
     should paper over it and export should end up with the CLEAN value, not
     the transient bad one. A bare read_dump (the old behavior) would have a
-    1-in-N chance of grabbing the glitchy read and silently saving it."""
+    1-in-N chance of grabbing the glitchy read and silently saving it.
+
+    read_dump_confirmed below calls the REAL Device.read_dump_confirmed,
+    which as of 2026-09-29 gates its retry-diagnostic prints behind
+    self.debug via self._dbg() (previously unconditional -- see
+    PROTOCOL_NOTES.md); this fake's glitch-then-agree sequence is exactly
+    the case that fires those prints, so both attributes are required now."""
+    debug = False
+    _dbg = gp200.Device._dbg
+
     def __init__(self, sequence):
         self.sequence = list(sequence)
         self.read_calls = 0
         self.closed = False
+        self._t0 = time.monotonic()
     def read_dump(self, slot):
         self.read_calls += 1
         return self.sequence.pop(0)

@@ -1,4 +1,4 @@
-import argparse, importlib.util, io, contextlib
+import argparse, importlib.util, io, contextlib, time
 from pathlib import Path
 
 GP200_PATH = str(Path(__file__).resolve().parent.parent / "gp200.py")
@@ -23,8 +23,16 @@ dump_bad = bytes(bad_bytes)[gp200.CONTENT_FILE_START:gp200.CHECKSUM_OFF]
 #    bytes, and write_and_verify propagates it as a 5th return value.
 # ---------------------------------------------------------------------------
 class FakeDeviceClean:
+    # verify_write_full and read_dump_confirmed below call the REAL Device
+    # methods, which as of 2026-09-29 both need self.debug (and, if a retry
+    # diagnostic actually fires, self._dbg/_t0) -- previously unconditional,
+    # now gated behind --debug (see PROTOCOL_NOTES.md).
+    debug = False
+    _dbg = gp200.Device._dbg
+
     def __init__(self, dump_bytes):
         self.dump_bytes = dump_bytes
+        self._t0 = time.monotonic()
     def read_dump(self, slot):
         return self.dump_bytes
     def read_dump_confirmed(self, slot, tries=3):
