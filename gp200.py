@@ -78,6 +78,7 @@ note above):
     py -3.12 gp200.py apply-template blank.prst 30-A 34-D
     py -3.12 gp200.py diag-write 34-B --template blank.prst  # the high-slot test
     py -3.12 gp200.py raw-sweep --all                         # single-read vs. confirmed, all slots
+    py -3.12 gp200.py drift 37-A --count 300                  # log 0x43/0x9F over 300 no-write reads
 """
 import argparse
 import atexit
@@ -2579,6 +2580,163 @@ def cmd_reread(args):
               "(python-rtmidi / the OS MIDI stack), not at the GP-200's write path.")
 
 
+def _parse_offset_list(text: str) -> list[int]:
+    """Parses a --offsets argument like '0x43,0x9F' or '67,159' into a list
+    of ints, preserving the given order and rejecting duplicates (tracking
+    the same offset twice would just double-count it in the summary below)."""
+    out = []
+    for piece in text.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        try:
+            val = int(piece, 0)  # base 0: accepts '0x43', '67', etc.
+        except ValueError:
+            raise ValueError(f"{piece!r} isn't a valid offset (try '0x43' or '67')")
+        if val in out:
+            raise ValueError(f"offset {piece!r} given more than once")
+        out.append(val)
+    if not out:
+        raise ValueError("--offsets needs at least one offset")
+    return out
+
+
+def _sleep_remaining(iter_start: float, interval: float) -> None:
+    """Sleeps just long enough that this iteration took `interval` seconds
+    total, accounting for how long the read itself already took -- so
+    --interval sets the spacing between the START of consecutive reads, not
+    an extra delay stacked on top of however long the device took to
+    answer. interval=0 (the default) means no deliberate pacing at all:
+    back-to-back as fast as the connection allows."""
+    if interval <= 0:
+        return
+    remaining = interval - (time.monotonic() - iter_start)
+    if remaining > 0:
+        time.sleep(remaining)
+
+
+def cmd_drift(args):
+    """Rapid-fire, NO-WRITE reads of one slot, logging how specific file
+    offsets change over time -- default the two known DEAD_BYTE_FILE_OFFSETS
+    (0x43, 0x9F). Exists to test an alternative explanation for why a plain
+    read of these two bytes is sometimes something other than the 0x00 a
+    write always reads back (see DEAD_BYTE_FILE_OFFSETS's own docstring):
+    so far that's been attributed entirely to a host-side receive glitch
+    (reread, RAW_DUMP_IGNORE_OFFSETS), on the strength of the *values*
+    involved clustering in a narrow, repeatable range rather than looking
+    like uniform random noise. An equally consistent alternative: these
+    bytes are real, live, device-internal state -- a counter or a
+    free-running clock -- that the device only ever COMMITS as 0x00 on
+    write, but freely reports its current live value on a plain read. This
+    command can't settle that by itself, but gives the raw material to look
+    for a pattern in: does the tracked value change roughly once per READ
+    (consistent with a per-query counter), or does it drift by roughly the
+    same amount per SECOND of wall-clock time regardless of how fast reads
+    are sent (consistent with a free-running clock)? Recommended use: run
+    this twice, once at the default --interval 0 (back-to-back) and once
+    with a deliberately large --interval, and compare the "change(s) per
+    read" and "change(s) per second" rates printed at the end of each run --
+    whichever of the two stays roughly constant across both runs is
+    probably what's actually driving the value.
+
+    Deliberately uses the RAW read_dump, never read_dump_confirmed -- same
+    reasoning as reread: confirming requires two reads to agree, which is
+    exactly the behavior in question here, so it would hide the very thing
+    this command exists to observe.
+    """
+    slot = label_to_slot(args.slot)  # validate before opening the connection
+    offsets = _parse_offset_list(args.offsets)
+    for off in offsets:
+        if off < CONTENT_FILE_START:
+            sys.exit(f"offset 0x{off:04X} is before the dump-covered region "
+                      f"(starts at 0x{CONTENT_FILE_START:04X})")
+
+    dev = Device(args.port, debug=args.debug)
+    history = {off: [] for off in offsets}  # off -> [(read#, elapsed_s, value|None), ...]
+    last_value = {off: None for off in offsets}
+    n_timeouts = 0
+    t0 = time.monotonic()
+    print(f"Reading {args.slot} up to {args.count} time(s), no writes in between, "
+          f"target spacing {args.interval:.3f}s...\n"
+          f"Tracking: " +
+          "; ".join(f"0x{o:04X} ({describe_prst_offset(o)})" for o in offsets) + "\n")
+    try:
+        for i in range(1, args.count + 1):
+            iter_start = time.monotonic()
+            try:
+                dump = dev.read_dump(slot)
+            except TimeoutError:
+                n_timeouts += 1
+                print(f"  [{i:4d}] (no response)")
+                for off in offsets:
+                    history[off].append((i, iter_start - t0, None))
+                _sleep_remaining(iter_start, args.interval)
+                continue
+            elapsed = iter_start - t0
+            changed = []
+            for off in offsets:
+                dump_i = off - CONTENT_FILE_START
+                val = dump[dump_i] if dump_i < len(dump) else None
+                history[off].append((i, elapsed, val))
+                if val != last_value[off]:
+                    old_s = "?" if last_value[off] is None else f"0x{last_value[off]:02X}"
+                    new_s = "?" if val is None else f"0x{val:02X}"
+                    changed.append(f"0x{off:04X}: {old_s} -> {new_s}")
+                    last_value[off] = val
+            if changed:
+                print(f"  [{i:4d}] t=+{elapsed:7.3f}s  " + "; ".join(changed))
+            elif i == 1 or i % 50 == 0:
+                cur = "; ".join(
+                    f"0x{o:04X}=" + ("?" if last_value[o] is None else f"0x{last_value[o]:02X}")
+                    for o in offsets)
+                print(f"  [{i:4d}] t=+{elapsed:7.3f}s  (no change so far; {cur})")
+            _sleep_remaining(iter_start, args.interval)
+    finally:
+        dev.close()
+
+    print()
+    n_ok = args.count - n_timeouts
+    print(f"{n_ok} successful read(s), {n_timeouts} timeout(s).")
+    for off in offsets:
+        rows = [(i, t, v) for i, t, v in history[off] if v is not None]
+        print(f"\n0x{off:04X} ({describe_prst_offset(off)}):")
+        if not rows:
+            print("  no successful reads -- nothing to report.")
+            continue
+        distinct = sorted(set(v for _, _, v in rows))
+        print(f"  {len(distinct)} distinct value(s) seen: " +
+              ", ".join(f"0x{v:02X}" for v in distinct))
+        transitions = []
+        prev = object()  # sentinel that can't equal any byte value
+        for i, t, v in rows:
+            if v != prev:
+                transitions.append((i, t, v))
+                prev = v
+        n_changes = len(transitions) - 1
+        if n_changes <= 0:
+            print(f"  never changed across {len(rows)} read(s) -- stayed at "
+                  f"0x{rows[0][2]:02X} the whole run.")
+            continue
+        print(f"  {n_changes} change(s) across {len(rows)} read(s)")
+        ups = sum(1 for (_, _, a), (_, _, b) in zip(transitions, transitions[1:])
+                  if b > a or (b < a and a - b > 200))  # a big drop reads as a wrap, not a decrease
+        downs = n_changes - ups
+        print(f"  of those: {ups} increase(s)-or-wrap, {downs} decrease(s) "
+              "(mostly increasing suggests a counter; a mix suggests noise)")
+        span_reads = transitions[-1][0] - transitions[0][0]
+        span_secs = transitions[-1][1] - transitions[0][1]
+        if span_reads > 0:
+            print(f"  ~{n_changes / span_reads:.3f} change(s) per read")
+        if span_secs > 0:
+            print(f"  ~{n_changes / span_secs:.3f} change(s) per second")
+        print("  full transition log:")
+        for i, t, v in transitions:
+            print(f"    read {i:4d}  t=+{t:7.3f}s  0x{v:02X}")
+    print("\nTo tell a per-read counter apart from a free-running clock, run this again with a "
+          "very different --interval: whichever rate above (per read, or per second) stays "
+          "roughly the same across both runs is probably what's actually driving the value.")
+
+
 def cmd_raw_sweep(args):
     """Added 2026-09-27, prompted directly by reviewing GP200 Studio's own
     source: its pull-a-patch path does exactly ONE read per slot, retrying
@@ -3065,6 +3223,20 @@ def main():
     s.add_argument("--against", help="compare every read against this .prst file instead of "
                                        "against the first successful read")
     s.set_defaults(func=cmd_reread)
+
+    s = sub.add_parser("drift",
+                        help="rapid-fire NO-WRITE reads of one slot, logging how specific bytes "
+                             "(default: the two known dead-byte offsets) change over time -- to "
+                             "test whether they're a live counter/clock rather than read noise")
+    s.add_argument("slot", help="a slot to repeatedly read, e.g. 37-A")
+    s.add_argument("--offsets", default="0x43,0x9F",
+                    help="comma-separated file offset(s) to track, e.g. '0x43,0x9F' (default) "
+                         "or a single '0x100'")
+    s.add_argument("--count", type=int, default=200, help="number of reads (default: 200)")
+    s.add_argument("--interval", type=float, default=0.0,
+                    help="target seconds between the START of each read (default: 0.0, i.e. "
+                         "back-to-back as fast as the connection allows)")
+    s.set_defaults(func=cmd_drift)
 
     s = sub.add_parser("raw-sweep",
                         help="compare one raw (Studio-style, single-read) pass against "
