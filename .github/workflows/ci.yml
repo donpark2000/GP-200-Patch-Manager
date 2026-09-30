@@ -57,6 +57,19 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: pip install mido python-rtmidi pyinstaller
+      - name: Stamp build version from git
+        # Bakes the exact commit (short hash + commit date) into
+        # _build_version.py, which gp200.py's get_version() imports if
+        # present -- the ONLY way a frozen, distributed executable can
+        # report an exact revision, since it has no .git directory of its
+        # own at runtime (PyInstaller --onefile extracts to a temp dir).
+        # shell: bash for identical behavior across all three OS runners --
+        # GitHub Actions provides Git Bash on windows-latest for this.
+        shell: bash
+        run: |
+          VERSION="$(git log -1 --format='%h %cs')"
+          echo "BUILD_VERSION = \"$VERSION\"" > _build_version.py
+          cat _build_version.py
       - name: Build with PyInstaller
         # mido loads its backend (python-rtmidi) dynamically at runtime
         # rather than via a normal top-level import, which PyInstaller's
@@ -111,4 +124,7 @@ jobs:
             have not each been individually confirmed to run correctly outside
             of it -- see the README for known platform-specific notes
             (macOS Gatekeeper, older-glibc Linux systems).
+
+            Run `gp200 --version` (or `--version` on the source script) to see
+            exactly which commit produced the build you downloaded.
           files: release-assets/*

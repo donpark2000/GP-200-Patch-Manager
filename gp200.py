@@ -79,6 +79,7 @@ note above):
     py -3.12 gp200.py diag-write 34-B --template blank.prst  # the high-slot test
     py -3.12 gp200.py raw-sweep --all                         # single-read vs. confirmed, all slots
     py -3.12 gp200.py drift 37-A --count 300                  # log 0x43/0x9F over 300 no-write reads
+    py -3.12 gp200.py --version                                # exact commit/build this is
 """
 import argparse
 import atexit
@@ -87,6 +88,7 @@ import math
 import platform
 import re
 import struct
+import subprocess
 import sys
 import time
 import zipfile
@@ -111,9 +113,65 @@ except ImportError:
         "    py -3.12 gp200.py ...\n"
         "(macOS/Linux: typically `python3.12` in place of `py -3.12`.)")
 
-# Bumped whenever a change ships, purely so a --log-file capture (or a bug
-# report) can be tied to an exact revision without guessing from behavior.
+# Last-resort version fallback ONLY (see get_version() below) -- kept as a
+# static constant rather than the primary version source because a hand-
+# maintained stamp reliably goes stale: as of this comment it still reads
+# "2026-09-27" despite several real, shipped changes since (the dead-byte
+# fix, PROTOCOL.md, the drift command...) landing without anyone
+# remembering to bump it. get_version() exists specifically so nothing
+# depends on a human remembering to do that going forward.
 SCRIPT_VERSION = "2026-09-27"
+
+
+def get_version() -> str:
+    """Best-effort version identifier for --version and the --log-file
+    header, checked in priority order:
+
+      1. A build-time stamp baked in by CI just before PyInstaller freezes
+         the script (_build_version.py, generated fresh for every build --
+         see .github/workflows/ci.yml). The ONLY source available inside a
+         distributed executable, which has no .git directory of its own
+         (PyInstaller's --onefile mode extracts to a temp directory at
+         runtime, not a checkout).
+      2. The live git history of wherever this script is actually running
+         from -- covers the common case of running gp200.py directly from
+         a clone (development, testing, a --log-file capture during real-
+         hardware work). Always accurate, no manual bumping, so it can
+         never drift stale the way SCRIPT_VERSION already has.
+      3. SCRIPT_VERSION, for the rare case neither of the above is
+         available (e.g. someone copied just gp200.py out of its repo,
+         with no .git and no CI-generated stamp). Necessarily approximate
+         -- there's no way to recover the exact revision from here, which
+         is exactly why this isn't the primary source any more.
+
+    Deliberately a short commit hash + commit DATE (e.g. "f4a586e
+    2026-09-30"), not a bare commit count: a count is git-history-shape
+    dependent (rebasing/squashing changes it with no behavior change, and
+    it doesn't survive branching/merging meaningfully), and tells a reader
+    nothing on its own. A hash pins the exact revision precisely; the date
+    next to it is what actually communicates "how recent" to a human in a
+    bug report or a support thread -- without needing a separate, hand-
+    maintained release-numbering scheme layered on top. If this project
+    ever starts doing discrete, numbered releases (rather than the current
+    single rolling "latest"), that would be a deliberate, separate axis
+    from this -- a curated "what's in this release" identity, not a
+    replacement for "exactly which commit produced this build."
+    """
+    try:
+        from _build_version import BUILD_VERSION
+        return BUILD_VERSION
+    except ImportError:
+        pass
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent),
+             "log", "-1", "--format=%h %cs"],
+            capture_output=True, text=True, timeout=2)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass  # git not installed, not a repo, PyInstaller temp dir, etc.
+    return f"{SCRIPT_VERSION} (exact revision unknown -- no .git or build stamp found)"
 
 HEADER = bytes([0xF0, 0x21, 0x25, 0x7E, 0x47, 0x50, 0x2D, 0x32])
 TOTAL_SLOTS = 256
@@ -2177,7 +2235,7 @@ def _start_run_log(path_arg: str | None) -> Path:
     just a harmless safety net, not the primary way to get a filename."""
     path = Path(path_arg) if path_arg else Path(f"gp200_{datetime.now():%Y%m%d_%H%M%S}.log")
     f = open(path, "w", encoding="utf-8")
-    f.write(f"gp200.py run log -- version {SCRIPT_VERSION}, started "
+    f.write(f"gp200.py run log -- version {get_version()}, started "
              f"{datetime.now().isoformat(timespec='seconds')}\n")
     f.write(f"command: {' '.join(sys.argv)}\n")
     orig_stdout, orig_stderr = sys.stdout, sys.stderr
@@ -3105,6 +3163,9 @@ def main():
         description="Command-line patch manager for the Valeton GP-200.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=CLI_EPILOG_TEMPLATE.format(prog=_prog_name()))
+    p.add_argument("--version", action="version", version=f"%(prog)s {get_version()}",
+                    help="print the exact build/revision this is (commit hash + date, or the CI "
+                         "build stamp for a downloaded executable) and exit")
     p.add_argument("--port", help="substring of the MIDI port name, if auto-detect finds none or too many")
     p.add_argument("-d", "--debug", action="store_true",
                     help="print every SysEx message sent and received, including ones that don't match "

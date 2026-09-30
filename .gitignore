@@ -1,3 +1,10 @@
+# Generated at build time by .github/workflows/ci.yml's "Stamp build
+# version from git" step, right before PyInstaller freezes the script --
+# see get_version()'s docstring in gp200.py. Never meant to be committed:
+# it's a snapshot of "whatever commit is being built right now," which is
+# already what git itself records for every other file.
+_build_version.py
+
 # Python
 __pycache__/
 *.pyc
