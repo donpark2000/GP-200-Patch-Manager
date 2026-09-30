@@ -84,9 +84,32 @@ def make_drift_args(**overrides):
     return ns
 
 
+class FakeClock:
+    """A strictly-increasing fake time.monotonic(), so cmd_drift's elapsed-
+    time math (and the "change(s) per second" line it's gated on) doesn't
+    depend on how fast the real OS clock ticks relative to how fast this
+    test's trivial in-memory fake reads execute. Real hardware reads always
+    take tens of milliseconds, so time reliably advances in production --
+    but a fast CI machine running an all-fake device with _sleep_remaining
+    patched to a no-op can complete several loop iterations before the real
+    monotonic clock advances at all (seen in practice: passed on Linux,
+    failed on windows-latest in CI), making elapsed time read as exactly 0
+    and correctly suppressing that line -- not a bug in cmd_drift, but a
+    test that was inadvertently platform/speed-dependent. Faking the clock
+    itself removes that dependency entirely."""
+    def __init__(self, start=1000.0, step=0.05):
+        self.t = start
+        self.step = step
+    def __call__(self):
+        self.t += self.step
+        return self.t
+
+
 orig_device = gp200.Device
 orig_sleep_remaining = gp200._sleep_remaining
+orig_monotonic = gp200.time.monotonic
 gp200._sleep_remaining = lambda *a, **kw: None  # keep the test instant, no real pacing needed
+gp200.time.monotonic = FakeClock()  # deterministic elapsed time, see FakeClock's docstring
 
 # A steady counter at 0x43 (0x00, 0x01, 0x02, 0x03, 0x04), 0x9F held fixed --
 # the shape a per-read counter on ONE tracked byte would produce.
@@ -177,6 +200,7 @@ except SystemExit:
 
 gp200.Device = orig_device
 gp200._sleep_remaining = orig_sleep_remaining
+gp200.time.monotonic = orig_monotonic
 
 print()
 if failures:
