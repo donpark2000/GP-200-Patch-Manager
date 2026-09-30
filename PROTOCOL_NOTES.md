@@ -2042,8 +2042,9 @@ still shows the expected raw noise at 0x9F (unaffected, by design --
 confirms it's still fully sensitive, not silently blinded by any of the
 above). `export --all` on both machines: fast, zero errors, no visible
 stalls -- the retries the progress dots used to show were indeed almost
-entirely noise at these two offsets. (The write-side half of this fix --
-re-uploading a patch and confirming a clean first-attempt verify -- was
-suggested as a follow-up test but not yet explicitly confirmed.) Direct
+entirely noise at these two offsets. The write-side half was then confirmed too: re-uploading the exact same
+corrupted test patch (offsets 0x43/0x9F only) that originally took 10
+attempts and still failed now verifies byte-for-byte on the first
+attempt. Both halves of the fix confirmed on real hardware. Direct
 feedback: "Learning what to ignore was an important step." Closing out
 this investigation thread here.
