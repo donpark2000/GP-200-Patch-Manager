@@ -2048,3 +2048,60 @@ attempts and still failed now verifies byte-for-byte on the first
 attempt. Both halves of the fix confirmed on real hardware. Direct
 feedback: "Learning what to ignore was an important step." Closing out
 this investigation thread here.
+
+## `drift`: rules out a free-running clock, and argues against a real counter too (2026-09-29)
+
+Curiosity raised directly, after the dead-byte finding closed out above:
+*"I wonder if it is not random. Maybe it is a counter of some kind."* Built
+a new command, `drift`, to test it directly: rapid, no-write reads of one
+slot, logging every change at 0x43/0x9F with its read index and elapsed
+time (raw `read_dump`, never `read_dump_confirmed`, same reasoning as
+`reread` -- confirming would hide exactly the instability being measured).
+The test design: run it twice against the same slot (37-A) for the same
+300 reads, once back-to-back (`--interval 0`) and once spaced 2.0s apart,
+and compare whether the value changes at a constant rate per READ (implying
+something tied to the request itself) or per SECOND (implying a
+free-running clock indifferent to read rate).
+
+**Result: decisively rules out a clock.** The two runs took 3.656s and
+598.375s respectively (a ~163x difference in wall-clock time and in
+average spacing between reads) but produced the SAME number of glitches --
+58 changes (~29 blips) in each. Changes-per-read came out nearly identical
+(0.195 vs. 0.198, within 1.5%); changes-per-second differed by ~160x,
+tracking the ~163x difference in read spacing almost exactly. If this were
+a clock ticking on its own schedule, the 10-minute run should have shown
+far more drift than the 3.6-second run -- it didn't. Whatever's happening
+is tied to the number of read REQUESTS sent, not to elapsed real time.
+
+**But the shape of the data argues against a real, evolving counter
+either.** Three things stand out, consistently across both runs:
+  - Every excursion is exactly ONE read wide -- the value jumps away from
+    0x00 and is back to exactly 0x00 on the very next read, every single
+    time, in both files. A genuine counter would stay elevated for a
+    stretch and drift; this snaps back to a fixed floor instantly.
+  - The increase-vs-decrease split is almost exactly 50/50 (29/29 in the
+    slow run, 28/30 in the fast run) -- not "mostly increasing," which is
+    what a counting-up-and-occasionally-wrapping value would produce. This
+    is the signature of noise around a fixed baseline, not progression.
+  - The garbage values themselves are confined to the same narrow bands
+    already documented above (0x36-0x38, 0xB4-0xB8 -- one new low-end value,
+    0xB4, not previously seen, otherwise the identical cluster), on the
+    same slot (37-A) as the very first `reread` finding. Strong repeat, not
+    coincidence.
+  - Overall glitch rate here: ~29 blips / 300 reads ~= 9.7%, consistent
+    with (a bit under) the ~12-15%-per-read rate measured earlier.
+  - 0x43 never changed at all across all 600 combined reads in both files
+    -- no instability on this particular slot/run, only 0x9F. Doesn't
+    contradict anything (0x43 has shown instability on other slots before,
+    e.g. the original 5-slot `reread` investigation above), just says this
+    slot's noise happened to land entirely on 0x9F today.
+
+**Net conclusion**: this refines, rather than replaces, the existing
+host-receive-glitch theory -- it's evidently tied to the act of servicing a
+read request (scales with request count, not with time), but isn't a
+value that meaningfully evolves the way a live counter or clock would.
+Doesn't change any existing behavior or the DEAD_BYTE_FILE_OFFSETS
+treatment (that's about write-time/export-time handling, and this doesn't
+touch it) -- purely a mechanistic refinement of *why* these two offsets are
+unstable on a plain read. Full `--log-file` output from both runs reviewed
+directly; not retained in the repo itself, just this summary of them.
