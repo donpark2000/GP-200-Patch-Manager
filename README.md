@@ -56,15 +56,21 @@ expected once real hardware got involved.
 
 ## Status
 
-- **Read/export path**: tested and trustworthy against real hardware.
-- **Write path**: has gone through several rounds of real-hardware testing
-  and a cross-check against a second independent reverse-engineering of the
-  protocol. `--method live` is confirmed to persist real changes, with a
-  known bug affecting a few effect parameter types. The default `--method
-  flash` (chunk upload) has not yet been re-confirmed against real hardware
-  after a recent fix -- see the top of `gp200.py` and `PROTOCOL_NOTES.md`
-  for the full, current, honest picture before trusting it with patches you
-  care about.
+- **Read/export path**: tested and trustworthy against real hardware. A
+  full `export --all` matches the web version's backup of the same pedal
+  byte for byte, all 256 slots.
+- **Write path**: the default `--method flash` (chunk upload) is confirmed
+  on real hardware since its addressing fix (found by cross-checking
+  against a second, independent reverse-engineering of the protocol).
+  Uploaded patches, exported again, matched their source files byte for
+  byte; three 20-cycle `soak` runs found no write that failed to store
+  (every mismatch was a misread, gone on re-reading); and a 48-slot
+  `apply-template` run went through. The web version sends exactly the
+  same upload messages (tested against this tool's own code); ten
+  full-pedal restores with it, each followed by a full export, matched
+  exactly. `--method live` also persists changes but has a known bug
+  affecting a few effect parameter types, so use the default. See
+  `PROTOCOL_NOTES.md` for the evidence behind each of these.
 
 This is an actively evolving personal project, not a finished product --
 `PROTOCOL_NOTES.md` tracks what's confirmed, what's still open, and the
@@ -184,8 +190,9 @@ second, independent reverse-engineering in [RigSheet](https://github.com/ricardo
 - Proper versioned releases (`v0.1.0`, etc.) once the project is stable
   enough to mean something by a version number, rather than just the
   rolling "latest" build every push produces today.
-- Re-confirm the default flash-chunk write path against real hardware after
-  its recent addressing fix.
+
+Not planned: bringing the web version's faster restore back to this tool
+(see the note at the top). Ask in an issue if you need it here.
 
 ## Contributing / Issues
 

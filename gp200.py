@@ -24,8 +24,14 @@ supposed to live inside the nibble-encoded payload itself (at two fixed
 offsets), not in the outer per-chunk SysEx header the way GP200 Studio's
 own capture assumed -- the outer header's byte there is a fixed constant on
 every write, the same way it already is on every read. This script now
-follows the RigSheet model; it has not yet been confirmed against real
-hardware (see build_upload_image's docstring for the exact fix). Because
+follows the RigSheet model (see build_upload_image's docstring for the
+exact fix), and that is confirmed on real hardware: uploaded patches
+exported back byte-for-byte, three 20-cycle soak runs stored every write
+(each mismatch was a misread, gone on re-reading), and a 48-slot
+apply-template run went through (PROTOCOL_NOTES.md). The web version
+(github.com/donpark2000/GP-200-Patch-Manager-Web) sends the same upload
+bytes, golden-tested against this file, and its full-pedal restores
+export back exactly. Because
 that also means the outer header's "slot byte" was never the addressing
 mechanism, --diag-write's high-slot/bank-33+ aliasing premise is now in
 question too -- treat its results with that in mind until re-verified.
