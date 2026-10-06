@@ -11,10 +11,22 @@ up your whole bank, push a collection of patches onto a fresh device, or pull
 one patch back down, this is a lightweight way to do it without a full
 editor.
 
+**Most people should use the web version instead:
+[GP-200 Patch Manager Web](https://donpark2000.github.io/GP-200-Patch-Manager-Web/)**
+([source](https://github.com/donpark2000/GP-200-Patch-Manager-Web)). It
+does the same backup and restore in Chrome or Edge, with nothing to
+install, and it's much faster: a full restore of all 256 slots takes about
+30 seconds there, against about 8 minutes here. The speed comes from what
+building these two tools taught us about the pedal (see
+[LESSONS.md](https://github.com/donpark2000/GP-200-Patch-Manager-Web/blob/main/LESSONS.md));
+those changes haven't been brought back to this command-line version. Use
+this one when you need a command line, for example to run backups from a
+script.
+
 ## Download
 
-Most people should just grab the pre-built executable for their OS -- no
-Python install needed. Get the latest one from the
+If you need the command line, grab the pre-built executable for your OS --
+no Python install needed. Get the latest one from the
 **[Releases page](../../releases/tag/latest)** ("Latest build", auto-updated
 by CI on every change to `main`):
 
@@ -32,11 +44,11 @@ system, see [Building from source](#building-from-source).
 
 ## Why this exists
 
-There are already excellent tools in this space -- [GP200 Studio](https://github.com/kabir0st/gp200-studio)
-(a full patch editor) and [RigSheet](https://github.com/ricardo-mv/rigsheet)
-(a web-based cheat-sheet/reference) both do real, valuable work here. This
-tool isn't trying to replace either of them or duplicate patch-creation
-features that already work fine. It covers a narrower gap: bulk,
+There's already an excellent editor in this space --
+[GP200 Studio](https://gp200studio.com/), a full patch editor
+([source](https://github.com/kabir0st/gp200-studio)). This tool isn't
+trying to replace it or duplicate patch-creation features that already
+work fine. It covers a narrower gap: bulk,
 scriptable backup/restore, plus a set of diagnostic commands for
 characterizing how reliable the USB-MIDI link actually is (see
 `PROTOCOL_NOTES.md`) -- something that turned out to matter more than
